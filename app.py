@@ -137,7 +137,7 @@ def create_dual_axis_chart(df, symbol):
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
-                  title='标记价格 (USDC)',
+                  title='',    #标记价格 (USDC)
                   titleColor='#d62728',
                   orient='right',
                   offset=0
@@ -185,7 +185,7 @@ def main_app():
     st.markdown("---") 
     
     # 1. 获取并排序所有合约列表
-    st.header("📉 合约热度排名 (按最新未平仓量/OI_USD 降序)")
+    # st.header("📉 合约热度排名 (按最新未平仓量/OI_USD 降序)")
     sorted_symbols = get_sorted_symbols_by_oi_usd()
     
     if not sorted_symbols:
@@ -213,3 +213,4 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
