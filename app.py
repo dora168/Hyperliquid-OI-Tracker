@@ -1,12 +1,11 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-# 保持原有的 pymysql, os, time 导入...
 import pymysql
 import os
 import time
 
-# --- A. 数据库连接配置 (保持不变) ---
+# --- A. 数据库连接配置 (用于 Streamlit Cloud 部署) ---
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
@@ -18,12 +17,10 @@ TABLE_NAME = 'hyperliquid'
 DATA_LIMIT = 4000 
 
 # --- B. 数据读取和排序函数 (保持不变) ---
-# ... (get_db_connection_params, get_sorted_symbols_by_oi_usd, fetch_data_for_symbol 保持不变) ...
 
 @st.cache_resource(ttl=3600)
 def get_db_connection_params():
     """返回数据库连接所需的参数字典。"""
-    # ... (函数内容保持不变) ...
     if not DB_PASSWORD:
         st.error("❌ 数据库密码未配置。请检查 Streamlit Secrets 或本地 secrets.toml 文件。")
         st.stop()
@@ -106,9 +103,9 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 ---
+# --- C. 核心绘图函数 (X 轴按等距索引显示) ---
 
-# Y 轴自定义格式逻辑 (Vega Expression) 保持不变
+# Y 轴自定义格式逻辑 (Vega Expression)
 axis_format_logic = """
 datum.value >= 1000000000 ? format(datum.value / 1000000000, ',.2f') + 'B' : 
 datum.value >= 1000000 ? format(datum.value / 1000000, ',.2f') + 'M' : 
@@ -121,10 +118,7 @@ LABEL_FONT_SIZE = 12
 LABEL_FONT_WEIGHT = 'bold'
 
 def create_dual_axis_chart(df, symbol):
-    """
-    【修改点 1】: 缩小高度到 250 像素，使其在两列布局中更紧凑。
-    生成一个双轴 Altair 图表，X 轴按等距索引显示数据点。
-    """
+    """生成一个双轴 Altair 图表，X 轴按等距索引显示数据点。"""
     
     if not df.empty:
         df['index'] = range(len(df))
@@ -143,14 +137,14 @@ def create_dual_axis_chart(df, symbol):
         alt.X('index', title=None, axis=alt.Axis(labels=False))
     )
     
-    # 2. 标记价格 (右轴，红色) - 保持 right 和 offset=0
+    # 2. 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
                   title='',
                   titleColor='#d62728',
                   orient='right',
-                  offset=0, 
+                  offset=0,
                   labelFontWeight=LABEL_FONT_WEIGHT,
                   labelFontSize=LABEL_FONT_SIZE
               ),
@@ -159,14 +153,14 @@ def create_dual_axis_chart(df, symbol):
         tooltip=tooltip_fields
     )
 
-    # 3. 未平仓量 (OI) (右轴偏移，紫色) - 保持 right 和 offset=70
+    # 3. 未平仓量 (OI) (右轴偏移，紫色)
     line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
         alt.Y('未平仓量',
               axis=alt.Axis(
                   title='未平仓量', 
                   titleColor='purple',
                   orient='right',
-                  offset=30,      # 使用 70 避免重叠
+                  offset= 45, 
                   labelExpr=axis_format_logic,
                   labelFontWeight=LABEL_FONT_WEIGHT,
                   labelFontSize=LABEL_FONT_SIZE
@@ -183,103 +177,71 @@ def create_dual_axis_chart(df, symbol):
     ).resolve_scale(
         y='independent'
     ).properties(
+        # 【修正】将 title=None 替换为 title='' (空字符串) 或完全省略。
         title='', 
-        height=250 # 【修改点 1：高度缩小到 250】
+        height=400 
     )
 
     st.altair_chart(chart, use_container_width=True)
 
-# --- E. 新增：币安数据占位函数 ---
 
-# 假设币安的表名为 binance_data
-BINANCE_TABLE_NAME = 'binance_data' 
+# --- D. UI 渲染：主应用逻辑 (修改为使用 Markdown + 超链接) ---
 
-def fetch_binance_data_for_symbol(symbol, limit=DATA_LIMIT):
-    """
-    【占位函数】从数据库中读取指定 symbol 的币安数据。
-    需要您实现具体的数据库查询逻辑。
-    """
-    # 暂时返回一个空的 DataFrame 作为占位
-    return pd.DataFrame() 
-
-
-def create_binance_chart(df, symbol):
-    """
-    【占位函数】生成币安合约 OI/价格图表。
-    需要您根据币安数据的字段实现 Altair 绘图逻辑。
-    """
-    if df.empty:
-        st.info(f"💡 币安 {symbol} 的数据查询结果为空，等待数据接入...")
-        return
-        
-    # TODO: 在此实现币安数据的绘图逻辑，例如：
-    # st.line_chart(df.set_index('time')) 
-    st.info(f"💡 占位图表：币安 {symbol} 数据已获取 ({len(df)} 条)，待绘制。")
-
-
-# --- F. UI 渲染：主应用逻辑 (修改为两列布局) ---
+# --- D. UI 渲染：主应用逻辑 (修改为使用 Markdown + 超链接) ---
 
 def main_app():
-    # 页面配置和标题 (保持不变)
+    # 页面配置和标题
     st.set_page_config(layout="wide", page_title="Hyperliquid OI Dashboard")
-    st.title("✅ Hyperliquid & Binance 合约未平仓量实时监控")
+    st.title("✅ Hyperliquid 合约未平仓量实时监控")
     st.markdown("---") 
     
-    # 1. 获取并排序所有合约列表 (Hyperliquid 仍是主排序依据)
-    st.header("📈 合约热度排名 (Hyperliquid OI 排序)")
+    # 1. 获取并排序所有合约列表
+    st.header("📈 合约热度排名")
     sorted_symbols = get_sorted_symbols_by_oi_usd()
     
     if not sorted_symbols:
-        st.error("无法获取 Hyperliquid 合约列表。请检查数据库连接和 Hyperliquid 表中是否有数据。")
+        st.error("无法获取合约列表。请检查数据库连接和 Hyperliquid 表中是否有数据。")
         st.stop()
 
-    # 2. 循环遍历并绘制所有合约的图表，使用两列布局
+    # 2. 循环遍历并绘制所有合约的图表
     for rank, symbol in enumerate(sorted_symbols, 1):
         
-        # 2a. 创建两列布局
-        col1, col2 = st.columns(2) 
+        # 默认展开前 100 名的图表
+        # 创建可点击的 Expander 标题，并添加 OI/价格图表的链接
+        coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
         
-        # --- 左列：Hyperliquid 图表 ---
-        with col1:
-            # 标题 (保持居中和链接)
-            coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
-            expander_title_html = (
-                f'<div style="text-align: center;">'
-                f'<a href="{coinglass_url}" target="_blank" '
-                f'style="text-decoration:none; color:inherit; font-weight:bold; font-size:24px;">'
-                f'#{rank}： {symbol} (HL)</a>'
-                f'</div>'
-            )
-            st.markdown(expander_title_html, unsafe_allow_html=True)
+        # 【修改点 START】 使用 <div style="text-align: center;"> 包裹标题超链接
+        expander_title_html = (
+            f'<div style="text-align: center;">' # 居中父元素
+            f'<a href="{coinglass_url}" target="_blank" '
+            f'style="text-decoration:none; color:inherit; font-weight:bold; font-size:24px;">'
+            f'#{rank}： {symbol} </a>'
+            f'</div>' # 结束居中父元素
+        )
+        
+        # 使用 Markdown 配合 unsafe_allow_html=True 来渲染 HTML 标题
+        st.markdown(expander_title_html, unsafe_allow_html=True)
+        # 【修改点 END】
+        
+        with st.expander("", expanded=(rank <= 100)): 
             
-            # 【核心修改点 1：移除 st.expander 代码块】
-            
-            # 2b. 读取和绘制数据
+            # 2a. 读取数据
             data_df = fetch_data_for_symbol(symbol)
             
             if not data_df.empty:
+                # 2b. 绘制图表
                 create_dual_axis_chart(data_df, symbol)
+                
+                # 仅保留分隔线
+                st.markdown("---") 
             else:
-                st.warning(f"⚠️ 警告：Hyperliquid {symbol} 数据采集失败。")
-
-        # --- 右列：币安图表 ---
-        with col2:
-            # 标题 (保持居中)
-            st.markdown(f'<div style="text-align: center; font-weight:bold; font-size:24px;">'
-                        f'#{rank}： {symbol} (Binance)</div>', unsafe_allow_html=True)
-
-            # 【核心修改点 2：移除 st.expander 代码块】
-            
-            # 2c. 读取和绘制币安数据 (占位逻辑)
-            binance_df = fetch_binance_data_for_symbol(symbol)
-            create_binance_chart(binance_df, symbol)
-        
-        # 在两列下方添加一个分隔线
-        st.markdown("---") 
+                st.warning(f"⚠️ 警告：合约 {symbol} 尚未采集到数据或查询失败。")
+                st.markdown("---")
 
 
 if __name__ == '__main__':
     main_app()
+
 
 
 
