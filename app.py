@@ -182,7 +182,7 @@ def create_dual_axis_chart(df, symbol):
     ).resolve_scale(
         y='independent'
     ).properties(
-        title=alt.Title(f"{symbol} 价格与未平仓量", anchor='middle',fontSize=18,fontWeight='bold'),
+        title=alt.Title(f"{symbol}", anchor='middle',fontSize=24,fontWeight='bold'),
         height=400 
     )
 
@@ -226,6 +226,7 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
 
