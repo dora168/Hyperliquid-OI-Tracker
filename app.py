@@ -6,7 +6,6 @@ import os
 import time
 
 # --- A. 数据库连接配置 (用于 Streamlit Cloud 部署) ---
-# 确保在 Streamlit Cloud 的 Secrets 中设置了 DB_HOST, DB_PORT, DB_USER, DB_PASSWORD
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
@@ -14,7 +13,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None)
 
 DB_CHARSET = 'utf8mb4'
 NEW_DB_NAME = 'open_interest_db'
-TABLE_NAME = 'Hyperliquid'
+TABLE_NAME = 'Hyperliquid' # 你的表名
 DATA_LIMIT = 4000 # 读取每个合约历史记录的行数限制
 
 # --- B. 数据读取和排序函数 ---
@@ -28,6 +27,7 @@ def get_db_connection():
         st.stop()
         return None
     try:
+        # 注意：这里默认不会提交事务，read_sql 会自动处理
         return pymysql.connect(
             host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
             db=NEW_DB_NAME, charset=DB_CHARSET
@@ -45,8 +45,7 @@ def get_sorted_symbols_by_oi():
     if conn is None: return []
 
     try:
-        # SQL 查询：获取每个合约的最新记录的 OI 值，并按 OI 降序排列
-        # *** 修正：移除了 SQL 语句中的 Python 注释符号 # ***
+        # *** 修正后的 SQL 查询：确保子查询中使用了 `{TABLE_NAME}` 变量和反引号 ***
         sql_query = f"""
         SELECT 
             t1.symbol, 
@@ -71,11 +70,10 @@ def get_sorted_symbols_by_oi():
         return df_oi_rank['symbol'].tolist()
         
     except Exception as e:
-        # 这里的报错信息会捕获 SQL 执行失败
         st.error(f"❌ 无法获取和排序合约列表: {e}")
         return []
 
-# 3. 读取指定合约数据
+# 3. 读取指定合约数据 (用于绘图)
 @st.cache_data(ttl=60)
 def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     """从数据库中读取指定 symbol 的最新数据"""
@@ -112,14 +110,12 @@ datum.value
 def create_dual_axis_chart(df, symbol):
     """生成一个双轴 Altair 图表，X轴使用时间，Y轴使用价格和未平仓量"""
     
-    # 确保时间列是日期时间类型，才能正确在X轴显示
     df['time'] = pd.to_datetime(df['time'])
     
     base = alt.Chart(df).encode(
         alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
     )
 
-    # 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
@@ -132,7 +128,6 @@ def create_dual_axis_chart(df, symbol):
         )
     )
 
-    # 未平仓量 (右轴偏移，紫色，K/M/B 格式)
     line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
         alt.Y('未平仓量',
               axis=alt.Axis(
@@ -150,7 +145,7 @@ def create_dual_axis_chart(df, symbol):
         y='independent'
     ).properties(
         title=alt.Title(f"{symbol} 价格与未平仓量", anchor='middle'),
-        height=400 # 优化高度以容纳多图
+        height=400 
     )
 
     st.altair_chart(chart, use_container_width=True)
