@@ -40,16 +40,19 @@ def get_db_connection():
 # 2. 获取所有合约及其最新 OI 的函数，用于排名
 @st.cache_data(ttl=60)
 def get_sorted_symbols_by_oi():
-    """获取所有合约的最新 OI 值，并返回一个按 OI 降序排列的合约列表。"""
+    """
+    获取所有合约的最新 OI 值，并返回一个按 OI/OI_USD 降序排列的合约列表。
+    *** 如果您的数据库中存在 oi_usd 字段，请将 SQL 语句中的 t1.oi 改为 t1.oi_usd ***
+    """
     conn = get_db_connection()
     if conn is None: return []
 
     try:
-        # SQL 查询：获取每个合约的最新记录的 OI 值，并按 OI 降序排列
+        # SQL 查询：获取每个合约的最新记录的 oi 值（作为排名依据），并按降序排列
         sql_query = f"""
         SELECT 
             t1.symbol, 
-            t1.oi  # 假设 oi 字段是 USD 计价的未平仓量
+            t1.oi  
         FROM `{TABLE_NAME}` t1
         INNER JOIN (
             SELECT symbol, MAX(time) as max_time
@@ -73,7 +76,7 @@ def get_sorted_symbols_by_oi():
         st.error(f"❌ 无法获取和排序合约列表: {e}")
         return []
 
-# 3. 读取指定合约数据
+# 3. 读取指定合约数据 (用于绘图)
 @st.cache_data(ttl=60)
 def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     """从数据库中读取指定 symbol 的最新数据"""
@@ -81,6 +84,8 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     if conn is None: return pd.DataFrame()
 
     try:
+        # 注意：这里读取的仍然是 oi，如果数据库中有 oi_usd，建议修改为：
+        # SELECT `time`, `price` AS `标记价格 (USDC)`, `oi_usd` AS `未平仓量`
         sql_query = f"""
         SELECT `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
         FROM `{TABLE_NAME}`
@@ -100,6 +105,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
 # --- C. 核心绘图函数 ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)，用于 OI (未平仓量)
+# 假设 oi 字段对应的是美元值，才使用 K/M/B 格式
 axis_format_logic = """
 datum.value >= 1000000000 ? format(datum.value / 1000000000, ',.2f') + 'B' : 
 datum.value >= 1000000 ? format(datum.value / 1000000, ',.2f') + 'M' : 
@@ -154,7 +160,7 @@ def create_dual_axis_chart(df, symbol):
     st.altair_chart(chart, use_container_width=True)
 
 
-# --- D. UI 渲染：主应用逻辑 (一次性展示并默认展开前 100) ---
+# --- D. UI 渲染：主应用逻辑 ---
 
 def main_app():
     # 页面配置和标题
@@ -183,8 +189,8 @@ def main_app():
                 # 2b. 绘制图表
                 create_dual_axis_chart(data_df, symbol)
                 
-                # *** 移除的数据预览部分 ***
-                st.markdown("---") # 仅保留分隔线
+                # 仅保留分隔线
+                st.markdown("---") 
             else:
                 st.warning(f"⚠️ 警告：合约 {symbol} 尚未采集到数据或查询失败。")
 
