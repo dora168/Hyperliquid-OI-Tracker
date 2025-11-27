@@ -187,6 +187,8 @@ def create_dual_axis_chart(df, symbol):
 
 # --- D. UI 渲染：主应用逻辑 (修改为使用 Markdown + 超链接) ---
 
+# --- D. UI 渲染：主应用逻辑 (修改为使用 Markdown + 超链接) ---
+
 def main_app():
     # 页面配置和标题
     st.set_page_config(layout="wide", page_title="Hyperliquid OI Dashboard")
@@ -207,16 +209,19 @@ def main_app():
         # 默认展开前 100 名的图表
         # 创建可点击的 Expander 标题，并添加 OI/价格图表的链接
         coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
-        # 使用 markdown 和 HTML <a> 标签创建大号、粗体、可点击的标题
-        # 字体大小使用 style="font-size:24px;" 
+        
+        # 【修改点 START】 使用 <div style="text-align: center;"> 包裹标题超链接
         expander_title_html = (
+            f'<div style="text-align: center;">' # 居中父元素
             f'<a href="{coinglass_url}" target="_blank" '
             f'style="text-decoration:none; color:inherit; font-weight:bold; font-size:24px;">'
             f'#{rank}： {symbol} </a>'
+            f'</div>' # 结束居中父元素
         )
         
         # 使用 Markdown 配合 unsafe_allow_html=True 来渲染 HTML 标题
         st.markdown(expander_title_html, unsafe_allow_html=True)
+        # 【修改点 END】
         
         with st.expander("", expanded=(rank <= 100)): 
             
@@ -236,6 +241,7 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
 
