@@ -10,6 +10,7 @@ import time
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
+# DB_PASSWORD 必须从 Secrets 中读取，以确保安全
 DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None) 
 
 DB_CHARSET = 'utf8mb4'
@@ -183,11 +184,15 @@ def main_app():
                 # 2b. 绘制图表
                 create_dual_axis_chart(data_df, symbol)
                 
-                # *** 移除的数据预览部分 ***
-                st.markdown("---") # 仅保留分隔线
+                # 2c. 显示数据表格
+                st.markdown(f"**最新 {symbol} 数据预览**")
+                data_df['time'] = pd.to_datetime(data_df['time']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                st.dataframe(data_df.tail(5), use_container_width=True, hide_index=True)
+                st.markdown("---") 
             else:
                 st.warning(f"⚠️ 警告：合约 {symbol} 尚未采集到数据或查询失败。")
 
 
 if __name__ == '__main__':
     main_app()
+
