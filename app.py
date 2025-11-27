@@ -27,7 +27,6 @@ def get_db_connection():
         st.stop()
         return None
     try:
-        # 注意：这里默认不会提交事务，read_sql 会自动处理
         return pymysql.connect(
             host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
             db=NEW_DB_NAME, charset=DB_CHARSET
@@ -37,19 +36,22 @@ def get_db_connection():
         st.stop()
         return None
 
-# 2. 获取所有合约及其最新 OI 的函数，用于排名
+# 2. 【已修改】获取所有合约及其最新 OI_USD 的函数，用于排名
 @st.cache_data(ttl=60)
-def get_sorted_symbols_by_oi():
-    """获取所有合约的最新 OI 值，并返回一个按 OI 降序排列的合约列表。"""
+def get_sorted_symbols_by_oi_usd():
+    """
+    获取所有合约的最新 OI_USD 值，并返回一个按 OI_USD 降序排列的合约列表。
+    直接使用数据库中的 oi_usd 字段。
+    """
     conn = get_db_connection()
     if conn is None: return []
 
     try:
-        # *** 修正后的 SQL 查询：确保子查询中使用了 `{TABLE_NAME}` 变量和反引号 ***
+        # SQL 查询：基于 t1.oi_usd 字段进行排序
         sql_query = f"""
         SELECT 
             t1.symbol, 
-            t1.oi  
+            t1.oi_usd  
         FROM `{TABLE_NAME}` t1
         INNER JOIN (
             SELECT symbol, MAX(time) as max_time
@@ -57,7 +59,7 @@ def get_sorted_symbols_by_oi():
             GROUP BY symbol
         ) t2 
         ON t1.symbol = t2.symbol AND t1.time = t2.max_time
-        ORDER BY t1.oi DESC;
+        ORDER BY t1.oi_usd DESC;
         """
         
         df_oi_rank = pd.read_sql(sql_query, conn)
@@ -66,23 +68,24 @@ def get_sorted_symbols_by_oi():
             st.error("数据库中没有找到任何合约的最新数据。")
             return []
 
-        # 返回按 oi 降序排列的 symbol 列表
+        # 返回按 oi_usd 降序排列的 symbol 列表
         return df_oi_rank['symbol'].tolist()
         
     except Exception as e:
         st.error(f"❌ 无法获取和排序合约列表: {e}")
         return []
 
-# 3. 读取指定合约数据 (用于绘图)
+# 3. 【已修改】读取指定合约数据 (用于绘图)
 @st.cache_data(ttl=60)
 def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
-    """从数据库中读取指定 symbol 的最新数据"""
+    """从数据库中读取指定 symbol 的最新数据，并使用 oi_usd 字段。"""
     conn = get_db_connection()
     if conn is None: return pd.DataFrame()
 
     try:
+        # SQL 查询：直接读取 oi_usd 并将其命名为 '未平仓量'
         sql_query = f"""
-        SELECT `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
+        SELECT `time`, `price` AS `标记价格 (USDC)`, `oi_usd` AS `未平仓量`
         FROM `{TABLE_NAME}`
         WHERE `symbol` = %s
         ORDER BY `time` DESC
@@ -108,7 +111,7 @@ datum.value
 """
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，X轴使用时间，Y轴使用价格和未平仓量"""
+    """生成一个双轴 Altair 图表，X轴使用时间，Y轴使用价格和未平仓量 (OI_USD)"""
     
     df['time'] = pd.to_datetime(df['time'])
     
@@ -116,6 +119,7 @@ def create_dual_axis_chart(df, symbol):
         alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
     )
 
+    # 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
@@ -128,10 +132,11 @@ def create_dual_axis_chart(df, symbol):
         )
     )
 
+    # 未平仓量 (右轴偏移，紫色，K/M/B 格式)
     line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
-        alt.Y('未平仓量',
+        alt.Y('未平仓量', # 此列现在对应 oi_usd
               axis=alt.Axis(
-                  title='未平仓量',
+                  title='未平仓量 (USD)', 
                   titleColor='purple',
                   orient='right',
                   offset=30,
@@ -144,7 +149,7 @@ def create_dual_axis_chart(df, symbol):
     chart = alt.layer(line_price, line_oi).resolve_scale(
         y='independent'
     ).properties(
-        title=alt.Title(f"{symbol} 价格与未平仓量", anchor='middle'),
+        title=alt.Title(f"{symbol} 价格与未平仓量 (USD)", anchor='middle'),
         height=400 
     )
 
@@ -160,8 +165,9 @@ def main_app():
     st.markdown("---") 
     
     # 1. 获取并排序所有合约列表
-    st.header("📉 合约热度排名 (按最新未平仓量降序)")
-    sorted_symbols = get_sorted_symbols_by_oi()
+    st.header("📉 合约热度排名 (按最新未平仓量/OI_USD 降序)")
+    # 【已修改】调用新的排序函数
+    sorted_symbols = get_sorted_symbols_by_oi_usd()
     
     if not sorted_symbols:
         st.error("无法获取合约列表。请检查数据库连接和 Hyperliquid 表中是否有数据。")
