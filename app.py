@@ -13,40 +13,45 @@ DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None)
 
 DB_CHARSET = 'utf8mb4'
 NEW_DB_NAME = 'open_interest_db'
-TABLE_NAME = 'Hyperliquid' # 你的表名
+# 【修正】根据截图，表名应为小写
+TABLE_NAME = 'hyperliquid' 
 DATA_LIMIT = 4000 # 读取每个合约历史记录的行数限制
 
 # --- B. 数据读取和排序函数 ---
 
-# 1. 缓存数据库连接资源
-@st.cache_resource(ttl=3600) 
-def get_db_connection():
-    """建立并缓存数据库连接，如果连接失败则在页面上显示错误并停止应用"""
+# 1. 缓存数据库连接资源 (返回连接参数，而不是连接对象本身)
+# ❗️ 为了避免 Streamlit Cloud 缓存数据库连接对象时出错，我们缓存连接参数
+@st.cache_resource(ttl=3600)
+def get_db_connection_params():
+    """返回数据库连接所需的参数字典。"""
     if not DB_PASSWORD:
         st.error("❌ 数据库密码未配置。请检查 Streamlit Secrets 或本地 secrets.toml 文件。")
         st.stop()
         return None
-    try:
-        return pymysql.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
-            db=NEW_DB_NAME, charset=DB_CHARSET
-        )
-    except Exception as e:
-        st.error(f"❌ 数据库连接失败: {e}。请检查您的网络和腾讯云配置。")
-        st.stop()
-        return None
+    return {
+        'host': DB_HOST,
+        'port': DB_PORT,
+        'user': DB_USER,
+        'password': DB_PASSWORD,
+        'db': NEW_DB_NAME,
+        'charset': DB_CHARSET,
+        'autocommit': True  # 【关键修正】设置 autocommit=True，避免事务回滚问题
+    }
 
 # 2. 【已修改】获取所有合约及其最新 OI_USD 的函数，用于排名
 @st.cache_data(ttl=60)
 def get_sorted_symbols_by_oi_usd():
     """
     获取所有合约的最新 OI_USD 值，并返回一个按 OI_USD 降序排列的合约列表。
-    直接使用数据库中的 oi_usd 字段。
     """
-    conn = get_db_connection()
-    if conn is None: return []
+    params = get_db_connection_params()
+    if params is None: return []
 
+    conn = None
     try:
+        # 使用 pymysql 连接，并设置 autocommit=True
+        conn = pymysql.connect(**params)
+        
         # SQL 查询：基于 t1.oi_usd 字段进行排序
         sql_query = f"""
         SELECT 
@@ -74,15 +79,22 @@ def get_sorted_symbols_by_oi_usd():
     except Exception as e:
         st.error(f"❌ 无法获取和排序合约列表: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()
 
 # 3. 【已修改】读取指定合约数据 (用于绘图)
 @st.cache_data(ttl=60)
 def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     """从数据库中读取指定 symbol 的最新数据，并使用 oi_usd 字段。"""
-    conn = get_db_connection()
-    if conn is None: return pd.DataFrame()
+    params = get_db_connection_params()
+    if params is None: return pd.DataFrame()
 
+    conn = None
     try:
+        # 使用 pymysql 连接，并设置 autocommit=True
+        conn = pymysql.connect(**params)
+        
         # SQL 查询：直接读取 oi_usd 并将其命名为 '未平仓量'
         sql_query = f"""
         SELECT `time`, `price` AS `标记价格 (USDC)`, `oi_usd` AS `未平仓量`
@@ -98,9 +110,12 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     except Exception as e:
         st.warning(f"⚠️ 查询 {symbol} 数据失败: {e}")
         return pd.DataFrame()
+    finally:
+        if conn:
+            conn.close()
 
 
-# --- C. 核心绘图函数 ---
+# --- C. 核心绘图函数 (保持不变) ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)，用于 OI (未平仓量)
 axis_format_logic = """
@@ -119,7 +134,6 @@ def create_dual_axis_chart(df, symbol):
         alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
     )
 
-    # 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
@@ -132,9 +146,8 @@ def create_dual_axis_chart(df, symbol):
         )
     )
 
-    # 未平仓量 (右轴偏移，紫色，K/M/B 格式)
     line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
-        alt.Y('未平仓量', # 此列现在对应 oi_usd
+        alt.Y('未平仓量',
               axis=alt.Axis(
                   title='未平仓量 (USD)', 
                   titleColor='purple',
@@ -156,7 +169,7 @@ def create_dual_axis_chart(df, symbol):
     st.altair_chart(chart, use_container_width=True)
 
 
-# --- D. UI 渲染：主应用逻辑 (一次性展示并默认展开前 100) ---
+# --- D. UI 渲染：主应用逻辑 (保持不变) ---
 
 def main_app():
     # 页面配置和标题
@@ -166,7 +179,6 @@ def main_app():
     
     # 1. 获取并排序所有合约列表
     st.header("📉 合约热度排名 (按最新未平仓量/OI_USD 降序)")
-    # 【已修改】调用新的排序函数
     sorted_symbols = get_sorted_symbols_by_oi_usd()
     
     if not sorted_symbols:
