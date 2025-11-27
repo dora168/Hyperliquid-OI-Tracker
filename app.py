@@ -16,7 +16,7 @@ NEW_DB_NAME = 'open_interest_db'
 TABLE_NAME = 'hyperliquid' 
 DATA_LIMIT = 4000 
 
-# --- B. 数据读取和排序函数 (排序逻辑保持不变，仍按 oi_usd) ---
+# --- B. 数据读取和排序函数 (保持不变) ---
 
 @st.cache_resource(ttl=3600)
 def get_db_connection_params():
@@ -74,7 +74,6 @@ def get_sorted_symbols_by_oi_usd():
         if conn:
             conn.close()
 
-# 3. 【关键修改】读取指定合约数据 (从 oi_usd 改为 oi)
 @st.cache_data(ttl=60)
 def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     """从数据库中读取指定 symbol 的最新数据，使用 oi 字段。"""
@@ -85,7 +84,6 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     try:
         conn = pymysql.connect(**params)
         
-        # SQL 查询：从 oi_usd 改为 oi
         sql_query = f"""
         SELECT `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
         FROM `{TABLE_NAME}`
@@ -105,10 +103,9 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (修改 Tooltip 和轴标签格式) ---
+# --- C. 核心绘图函数 (添加数据连接/填充逻辑) ---
 
-# Y 轴自定义格式逻辑 (Vega Expression)，现在应用于 oi (可能是很大的整数)
-# 使用 ',.0f' 格式显示大的整数，并继续使用 K/M/B 缩写
+# Y 轴自定义格式逻辑 (Vega Expression)
 axis_format_logic = """
 datum.value >= 1000000000 ? format(datum.value / 1000000000, ',.2f') + 'B' : 
 datum.value >= 1000000 ? format(datum.value / 1000000, ',.2f') + 'M' : 
@@ -117,27 +114,37 @@ format(datum.value, ',.0f')
 """
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，使用 oi 字段，并修正了 Tooltip 格式。"""
+    """生成一个双轴 Altair 图表，使用 Pandas 重采样和填充来连接数据。"""
     
     df['time'] = pd.to_datetime(df['time'])
     
-    base = alt.Chart(df).encode(
-        alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
-    )
+    # 【关键修正】：数据填充和重采样逻辑
+    if not df.empty:
+        # 将 time 设为索引
+        df = df.set_index('time')
+        # 重采样到 1 分钟间隔 ('1T')，使用前一个有效值进行填充 ('ffill')
+        # 这确保了线图是连续的，缺失的数据点被前一个值代替
+        df = df.resample('1T').ffill()
+        # 重置索引，将 time 变回普通列
+        df = df.reset_index()
 
     # Tooltip 格式化设置：
     tooltip_fields = [
         alt.Tooltip('time', title='时间', format="%Y-%m-%d %H:%M:%S"),
         alt.Tooltip('标记价格 (USDC)', title='标记价格', format='$,.4f'),
-        # 【关键修改】：Tooltip 格式改为 ',.0f' (纯整数，不带 $)
         alt.Tooltip('未平仓量', title='OI', format=',.0f') 
     ]
     
+    # 1. 定义基础图表
+    base = alt.Chart(df).encode(
+        alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
+    )
+
     # 2. 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
-                  title='',    #标记价格 (USDC)
+                  title='标记价格 (USDC)',
                   titleColor='#d62728',
                   orient='right',
                   offset=0
@@ -155,7 +162,7 @@ def create_dual_axis_chart(df, symbol):
                   titleColor='purple',
                   orient='right',
                   offset=30, 
-                  labelExpr=axis_format_logic # 使用 K/M/B 缩写，但显示的是 OI 合约数
+                  labelExpr=axis_format_logic
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
@@ -213,5 +220,6 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
