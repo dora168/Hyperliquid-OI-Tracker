@@ -119,12 +119,21 @@ def create_dual_axis_chart(df, symbol):
     # 确保 time 是 datetime 类型
     if 'time' in df.columns and not df.empty:
         df['time'] = pd.to_datetime(df['time'])
-    
-    # 【关键修正 1】：创建等距索引列，并将其转换为字符串
-    if not df.empty:
-        # 使用真实的 time 字段作为 X 轴，但强制类型为 Nominal/Ordinal (N/O)，使其等距
-        # 为避免 Altair 警告，先将 time 转换为字符串，使其成为 Nominal 类型
+        # 创建时间标签列
         df['时间标签'] = df['time'].dt.strftime('%m-%d %H:%M')
+    elif df.empty:
+        # 如果 df 为空，直接返回
+        st.warning(f"⚠️ 警告：合约 {symbol} 数据为空，无法绘图。")
+        return
+
+    # 【关键修正】：安全地生成刻度值列表
+    if len(df) > 10:
+        # 如果数据点过多，只选择约 10 个点作为刻度值
+        step = max(1, len(df) // 10)
+        tick_values = df['时间标签'].iloc[::step].tolist()
+    else:
+        # 如果数据点较少，显示所有刻度
+        tick_values = df['时间标签'].tolist()
     
     # Tooltip 格式化设置：
     tooltip_fields = [
@@ -135,17 +144,13 @@ def create_dual_axis_chart(df, symbol):
     
     # 1. 定义基础图表
     base = alt.Chart(df).encode(
-        # 【关键修正 2】：X 轴使用新创建的 '时间标签' 列，并强制类型为 Nominal (N)
-        # 这样数据点将等距排列，且标签显示为时间字符串
+        # X 轴使用 '时间标签' (Nominal) 确保等距排列
         alt.X('时间标签:N', 
               title='时间', 
               axis=alt.Axis(
-                  # 限制标签数量，避免 X 轴过于拥挤
-                  tickCount='time', 
-                  # 旋转标签，以节省空间
-                  labelAngle=-45,
-                  # 确保标签仅在数据点的位置显示
-                  values=df['时间标签'].iloc[::max(1, len(df)//10)].tolist() if len(df) > 10 else alt.Undefined
+                  # 明确设置 values 属性以消除错误
+                  values=tick_values, 
+                  labelAngle=-45
               )
         )
     )
@@ -230,7 +235,3 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
-
-
-
-
