@@ -103,7 +103,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (X 轴按等距索引显示) ---
+# --- C. 核心绘图函数 (X 轴按等距索引显示，并显示时间标签) ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)
 axis_format_logic = """
@@ -114,26 +114,28 @@ format(datum.value, ',.0f')
 """
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，X 轴按等距索引显示数据点。"""
+    """生成一个双轴 Altair 图表，X 轴按等距索引显示数据点，并显示时间标签。"""
     
-    # 移除时间格式转换，但保留时间字段用于 Tooltip
-    # df['time'] = pd.to_datetime(df['time']) 
-    
-    # 【关键修正 1】：移除重采样/填充逻辑 (不再需要)
-    # if not df.empty:
-    #     df = df.set_index('time')
-    #     df = df.resample('1T').ffill()
-    #     df = df.reset_index()
+    # 确保 time 是 datetime 类型
+    if 'time' in df.columns and not df.empty:
+        df['time'] = pd.to_datetime(df['time'])
+        # 创建时间标签列
+        df['时间标签'] = df['time'].dt.strftime('%m-%d %H:%M')
+    elif df.empty:
+        # 如果 df 为空，直接返回
+        st.warning(f"⚠️ 警告：合约 {symbol} 数据为空，无法绘图。")
+        return
 
-    # 【关键修正 2】：创建等距索引列
-    if not df.empty:
-        df['index'] = range(len(df))
+    # 安全地生成刻度值列表
+    # 如果数据点过多，只选择约 10 个点作为刻度值
+    if len(df) > 10:
+        step = max(1, len(df) // 10)
+        tick_values = df['时间标签'].iloc[::step].tolist()
+    else:
+        # 如果数据点较少，显示所有刻度
+        tick_values = df['时间标签'].tolist()
     
     # Tooltip 格式化设置：
-    # 我们希望 Tooltip 仍然显示真实时间，所以 time 必须是 datetime 类型
-    if 'time' in df.columns:
-        df['time'] = pd.to_datetime(df['time'])
-
     tooltip_fields = [
         alt.Tooltip('time', title='时间', format="%Y-%m-%d %H:%M:%S"),
         alt.Tooltip('标记价格 (USDC)', title='标记价格', format='$,.4f'),
@@ -142,10 +144,17 @@ def create_dual_axis_chart(df, symbol):
     
     # 1. 定义基础图表
     base = alt.Chart(df).encode(
-        # 【关键修正 3】：X 轴使用索引 'index'，类型设为定量 (Q)，并隐藏标题
-        alt.X('index', title=None, axis=alt.Axis(labels=False))
+        # X 轴使用 '时间标签' (Nominal) 确保等距排列
+        alt.X('时间标签:N', 
+              title='时间', 
+              axis=alt.Axis(
+                  # 明确设置 values 属性以消除错误
+                  values=tick_values, 
+                  labelAngle=-45
+              )
+        )
     )
-    
+
     # 2. 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
@@ -153,7 +162,10 @@ def create_dual_axis_chart(df, symbol):
                   title='标记价格 (USDC)',
                   titleColor='#d62728',
                   orient='right',
-                  offset=0
+                  offset=0,
+                  # 【关键修改】：加大加粗 Y 轴刻度字体
+                  labelFontSize=12,
+                  labelFontWeight='bold'
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
@@ -168,7 +180,10 @@ def create_dual_axis_chart(df, symbol):
                   titleColor='purple',
                   orient='right',
                   offset=30, 
-                  labelExpr=axis_format_logic
+                  labelExpr=axis_format_logic,
+                  # 【关键修改】：加大加粗 Y 轴刻度字体
+                  labelFontSize=12,
+                  labelFontWeight='bold'
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
