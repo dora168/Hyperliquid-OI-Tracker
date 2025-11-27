@@ -14,11 +14,10 @@ DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None)
 DB_CHARSET = 'utf8mb4'
 NEW_DB_NAME = 'open_interest_db'
 TABLE_NAME = 'hyperliquid' 
-DATA_LIMIT = 4000 # 读取每个合约历史记录的行数限制
+DATA_LIMIT = 4000 
 
 # --- B. 数据读取和排序函数 (保持不变) ---
 
-# 1. 缓存数据库连接参数 (避免 Streamlit Cloud 缓存连接对象时出错)
 @st.cache_resource(ttl=3600)
 def get_db_connection_params():
     """返回数据库连接所需的参数字典。"""
@@ -36,12 +35,9 @@ def get_db_connection_params():
         'autocommit': True 
     }
 
-# 2. 获取所有合约及其最新 OI_USD 的函数，用于排名
 @st.cache_data(ttl=60)
 def get_sorted_symbols_by_oi_usd():
-    """
-    获取所有合约的最新 OI_USD 值，并返回一个按 OI_USD 降序排列的合约列表。
-    """
+    """获取所有合约的最新 OI_USD 值，并返回一个按 OI_USD 降序排列的合约列表。"""
     params = get_db_connection_params()
     if params is None: return []
 
@@ -78,7 +74,6 @@ def get_sorted_symbols_by_oi_usd():
         if conn:
             conn.close()
 
-# 3. 读取指定合约数据 (用于绘图)
 @st.cache_data(ttl=60)
 def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     """从数据库中读取指定 symbol 的最新数据，并使用 oi_usd 字段。"""
@@ -89,7 +84,6 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     try:
         conn = pymysql.connect(**params)
         
-        # SQL 查询：直接读取 oi_usd 并将其命名为 '未平仓量'
         sql_query = f"""
         SELECT `time`, `price` AS `标记价格 (USDC)`, `oi_usd` AS `未平仓量`
         FROM `{TABLE_NAME}`
@@ -109,7 +103,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (添加 Tooltip) ---
+# --- C. 核心绘图函数 (解决刻度遮挡问题) ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)，用于 OI (未平仓量)
 axis_format_logic = """
@@ -120,11 +114,10 @@ datum.value
 """
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，添加了 Tooltip 和交互层。"""
+    """生成一个双轴 Altair 图表，添加了 Tooltip 和交互层，并修正了 Y 轴偏移量。"""
     
     df['time'] = pd.to_datetime(df['time'])
     
-    # 1. 定义基础图表和 Selection
     base = alt.Chart(df).encode(
         alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
     )
@@ -151,11 +144,11 @@ def create_dual_axis_chart(df, symbol):
                   title='标记价格 (USDC)',
                   titleColor='#d62728',
                   orient='right',
-                  offset=0
+                  # 【关键修正】：设置第一个轴的偏移量为 0
+                  offset=0 
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
-        # 添加 Tooltip
         tooltip=tooltip_fields
     ).add_params(nearest)
 
@@ -167,40 +160,37 @@ def create_dual_axis_chart(df, symbol):
                   title='未平仓量 (USD)', 
                   titleColor='purple',
                   orient='right',
-                  offset=30,
+                  # 【关键修正】：增加第二个轴的偏移量到 45
+                  offset=45, 
                   labelExpr=axis_format_logic
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
-        # 添加 Tooltip
         tooltip=tooltip_fields
     ).add_params(nearest)
     
     # 4. 创建交互层 (透明点和规则线)
-    # 绘制不可见的点，以便 nearest selection 能够捕获到数据点
     points = line_price.mark_point().encode(
-        opacity=alt.value(0) # 使点透明
+        opacity=alt.value(0) 
     )
 
-    # 绘制垂直规则线
     rulers = alt.Chart(df).mark_rule(color='gray', strokeDash=[3, 3]).encode(
         x='time',
-        # 根据 selection 调整规则线的透明度，当 selection 激活时显示
         opacity=alt.condition(nearest, alt.value(0.7), alt.value(0)) 
     ).add_params(nearest)
 
     # 5. 组合图表
     chart = alt.layer(
-        rulers, # 规则线在最底层
+        rulers,
         line_price, 
         line_oi,
-        points # 透明点在最上层，方便鼠标捕获
+        points
     ).resolve_scale(
         y='independent'
     ).properties(
         title=alt.Title(f"{symbol} 价格与未平仓量 (USD)", anchor='middle'),
         height=400 
-    ).interactive() # 允许图表进行缩放和平移
+    ).interactive()
 
     st.altair_chart(chart, use_container_width=True)
 
