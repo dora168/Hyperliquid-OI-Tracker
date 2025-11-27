@@ -103,7 +103,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (X 轴按等距索引显示) ---
+# --- C. 核心绘图函数 (X 轴按等距索引显示，并显示时间标签) ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)
 axis_format_logic = """
@@ -114,26 +114,19 @@ format(datum.value, ',.0f')
 """
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，X 轴按等距索引显示数据点。"""
+    """生成一个双轴 Altair 图表，X 轴按等距索引显示数据点，并显示时间标签。"""
     
-    # 移除时间格式转换，但保留时间字段用于 Tooltip
-    # df['time'] = pd.to_datetime(df['time']) 
+    # 确保 time 是 datetime 类型
+    if 'time' in df.columns and not df.empty:
+        df['time'] = pd.to_datetime(df['time'])
     
-    # 【关键修正 1】：移除重采样/填充逻辑 (不再需要)
-    # if not df.empty:
-    #     df = df.set_index('time')
-    #     df = df.resample('1T').ffill()
-    #     df = df.reset_index()
-
-    # 【关键修正 2】：创建等距索引列
+    # 【关键修正 1】：创建等距索引列，并将其转换为字符串
     if not df.empty:
-        df['index'] = range(len(df))
+        # 使用真实的 time 字段作为 X 轴，但强制类型为 Nominal/Ordinal (N/O)，使其等距
+        # 为避免 Altair 警告，先将 time 转换为字符串，使其成为 Nominal 类型
+        df['时间标签'] = df['time'].dt.strftime('%m-%d %H:%M')
     
     # Tooltip 格式化设置：
-    # 我们希望 Tooltip 仍然显示真实时间，所以 time 必须是 datetime 类型
-    if 'time' in df.columns:
-        df['time'] = pd.to_datetime(df['time'])
-
     tooltip_fields = [
         alt.Tooltip('time', title='时间', format="%Y-%m-%d %H:%M:%S"),
         alt.Tooltip('标记价格 (USDC)', title='标记价格', format='$,.4f'),
@@ -142,10 +135,21 @@ def create_dual_axis_chart(df, symbol):
     
     # 1. 定义基础图表
     base = alt.Chart(df).encode(
-        # 【关键修正 3】：X 轴使用索引 'index'，类型设为定量 (Q)，并隐藏标题
-        alt.X('index', title=None, axis=alt.Axis(labels=False))
+        # 【关键修正 2】：X 轴使用新创建的 '时间标签' 列，并强制类型为 Nominal (N)
+        # 这样数据点将等距排列，且标签显示为时间字符串
+        alt.X('时间标签:N', 
+              title='时间', 
+              axis=alt.Axis(
+                  # 限制标签数量，避免 X 轴过于拥挤
+                  tickCount='time', 
+                  # 旋转标签，以节省空间
+                  labelAngle=-45,
+                  # 确保标签仅在数据点的位置显示
+                  values=df['时间标签'].iloc[::max(1, len(df)//10)].tolist() if len(df) > 10 else alt.Undefined
+              )
+        )
     )
-    
+
     # 2. 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
@@ -226,6 +230,7 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
 
