@@ -103,7 +103,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (解决刻度遮挡问题) ---
+# --- C. 核心绘图函数 (恢复偏移量，移除交互元素) ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)，用于 OI (未平仓量)
 axis_format_logic = """
@@ -114,7 +114,7 @@ datum.value
 """
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，添加了 Tooltip 和交互层，并修正了 Y 轴偏移量。"""
+    """生成一个双轴 Altair 图表，恢复了 Y 轴偏移量，并仅保留 Tooltip 功能。"""
     
     df['time'] = pd.to_datetime(df['time'])
     
@@ -122,21 +122,13 @@ def create_dual_axis_chart(df, symbol):
         alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
     )
 
-    # Tooltip 格式化设置：
+    # Tooltip 格式化设置 (保持 Tooltip 功能不变)：
     tooltip_fields = [
         alt.Tooltip('time', title='时间', format="%Y-%m-%d %H:%M:%S"),
         alt.Tooltip('标记价格 (USDC)', title='标记价格', format='$,.4f'),
         alt.Tooltip('未平仓量', title='OI (USD)', format='$,.0f')
     ]
     
-    # 定义 Selection，用于捕获最近的点
-    nearest = alt.selection_point(
-        on='mouseover', 
-        nearest=True, 
-        fields=['time'], 
-        empty='none'
-    )
-
     # 2. 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
@@ -144,14 +136,13 @@ def create_dual_axis_chart(df, symbol):
                   title='标记价格 (USDC)',
                   titleColor='#d62728',
                   orient='right',
-                  # 【关键修正】：设置第一个轴的偏移量为 0
-                  offset=0 
+                  offset=0 # 保持 0 偏移
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
+        # 添加 Tooltip
         tooltip=tooltip_fields
-    ).add_params(nearest)
-
+    ) # 移除了 .add_params(nearest)
 
     # 3. 未平仓量 (OI_USD) (右轴偏移，紫色)
     line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
@@ -160,37 +151,26 @@ def create_dual_axis_chart(df, symbol):
                   title='未平仓量 (USD)', 
                   titleColor='purple',
                   orient='right',
-                  # 【关键修正】：增加第二个轴的偏移量到 45
-                  offset=45, 
+                  # 【关键修正】：恢复偏移量为 30
+                  offset=30, 
                   labelExpr=axis_format_logic
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
+        # 添加 Tooltip
         tooltip=tooltip_fields
-    ).add_params(nearest)
+    ) # 移除了 .add_params(nearest)
     
-    # 4. 创建交互层 (透明点和规则线)
-    points = line_price.mark_point().encode(
-        opacity=alt.value(0) 
-    )
-
-    rulers = alt.Chart(df).mark_rule(color='gray', strokeDash=[3, 3]).encode(
-        x='time',
-        opacity=alt.condition(nearest, alt.value(0.7), alt.value(0)) 
-    ).add_params(nearest)
-
-    # 5. 组合图表
+    # 4. 组合图表 (移除了 rulers 和 points 层)
     chart = alt.layer(
-        rulers,
         line_price, 
-        line_oi,
-        points
+        line_oi
     ).resolve_scale(
         y='independent'
     ).properties(
         title=alt.Title(f"{symbol} 价格与未平仓量 (USD)", anchor='middle'),
         height=400 
-    ).interactive()
+    ) # 移除了 .interactive()
 
     st.altair_chart(chart, use_container_width=True)
 
@@ -204,7 +184,7 @@ def main_app():
     st.markdown("---") 
     
     # 1. 获取并排序所有合约列表
-    st.header("📉 合约热度排名 (按最新未平仓量/OI_USD 降序)")
+    # st.header("📉 合约热度排名 (按最新未平仓量/OI_USD 降序)")
     sorted_symbols = get_sorted_symbols_by_oi_usd()
     
     if not sorted_symbols:
