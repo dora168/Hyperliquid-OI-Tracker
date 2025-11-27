@@ -113,24 +113,19 @@ datum.value >= 1000 ? format(datum.value / 1000, ',.1f') + 'K' :
 format(datum.value, ',.0f')
 """
 
+# 定义 Y 轴标签样式常量
+LABEL_FONT_SIZE = 12
+LABEL_FONT_WEIGHT = 'bold'
+
+
 def create_dual_axis_chart(df, symbol):
     """生成一个双轴 Altair 图表，X 轴按等距索引显示数据点。"""
     
-    # 移除时间格式转换，但保留时间字段用于 Tooltip
-    # df['time'] = pd.to_datetime(df['time']) 
-    
-    # 【关键修正 1】：移除重采样/填充逻辑 (不再需要)
-    # if not df.empty:
-    #     df = df.set_index('time')
-    #     df = df.resample('1T').ffill()
-    #     df = df.reset_index()
-
-    # 【关键修正 2】：创建等距索引列
+    # 【关键修正 1】：创建等距索引列
     if not df.empty:
         df['index'] = range(len(df))
     
     # Tooltip 格式化设置：
-    # 我们希望 Tooltip 仍然显示真实时间，所以 time 必须是 datetime 类型
     if 'time' in df.columns:
         df['time'] = pd.to_datetime(df['time'])
 
@@ -153,7 +148,11 @@ def create_dual_axis_chart(df, symbol):
                   title='标记价格 (USDC)',
                   titleColor='#d62728',
                   orient='right',
-                  offset=0
+                  offset=0,
+                  # ********** Y 轴刻度标签样式修改 **********
+                  labelFontWeight=LABEL_FONT_WEIGHT,
+                  labelFontSize=LABEL_FONT_SIZE
+                  # *****************************************
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
@@ -168,7 +167,11 @@ def create_dual_axis_chart(df, symbol):
                   titleColor='purple',
                   orient='right',
                   offset=30, 
-                  labelExpr=axis_format_logic
+                  labelExpr=axis_format_logic,
+                  # ********** Y 轴刻度标签样式修改 **********
+                  labelFontWeight=LABEL_FONT_WEIGHT,
+                  labelFontSize=LABEL_FONT_SIZE
+                  # *****************************************
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
