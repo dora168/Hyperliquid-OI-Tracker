@@ -1,2 +1,2 @@
-# 许多云环境需要 libmysqlclient-dev 来连接 MySQL
-libmysqlclient-dev
+# 替换 libmysqlclient-dev 为 libmysqlclient21
+libmysqlclient21
