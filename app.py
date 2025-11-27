@@ -10,7 +10,6 @@ import time
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
-# DB_PASSWORD 必须从 Secrets 中读取，以确保安全
 DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None) 
 
 DB_CHARSET = 'utf8mb4'
@@ -47,10 +46,11 @@ def get_sorted_symbols_by_oi():
 
     try:
         # SQL 查询：获取每个合约的最新记录的 OI 值，并按 OI 降序排列
+        # *** 修正：移除了 SQL 语句中的 Python 注释符号 # ***
         sql_query = f"""
         SELECT 
             t1.symbol, 
-            t1.oi  # 假设 oi 字段是 USD 计价的未平仓量
+            t1.oi  
         FROM `{TABLE_NAME}` t1
         INNER JOIN (
             SELECT symbol, MAX(time) as max_time
@@ -71,6 +71,7 @@ def get_sorted_symbols_by_oi():
         return df_oi_rank['symbol'].tolist()
         
     except Exception as e:
+        # 这里的报错信息会捕获 SQL 执行失败
         st.error(f"❌ 无法获取和排序合约列表: {e}")
         return []
 
@@ -184,10 +185,7 @@ def main_app():
                 # 2b. 绘制图表
                 create_dual_axis_chart(data_df, symbol)
                 
-                # 2c. 显示数据表格
-                st.markdown(f"**最新 {symbol} 数据预览**")
-                data_df['time'] = pd.to_datetime(data_df['time']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                st.dataframe(data_df.tail(5), use_container_width=True, hide_index=True)
+                # 仅保留分隔线
                 st.markdown("---") 
             else:
                 st.warning(f"⚠️ 警告：合约 {symbol} 尚未采集到数据或查询失败。")
