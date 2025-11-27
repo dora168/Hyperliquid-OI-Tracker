@@ -172,7 +172,7 @@ def create_dual_axis_chart(df, symbol):
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
-                  title='标记价格 (USDC)',
+                  title='',
                   titleColor='#d62728',
                   orient='right',
                   offset=0,
@@ -191,7 +191,7 @@ def create_dual_axis_chart(df, symbol):
                   title='未平仓量', 
                   titleColor='purple',
                   orient='right',
-                  offset= 70, # 使用 70 避免重叠
+                  offset= 45, # 使用 70 避免重叠
                   labelExpr=axis_format_logic,
                   labelFontWeight=LABEL_FONT_WEIGHT,
                   labelFontSize=LABEL_FONT_SIZE
@@ -269,4 +269,5 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
