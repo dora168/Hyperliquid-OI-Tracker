@@ -113,24 +113,16 @@ datum.value >= 1000 ? format(datum.value / 1000, ',.1f') + 'K' :
 format(datum.value, ',.0f')
 """
 
+# 定义 Y 轴标签样式常量
+LABEL_FONT_SIZE = 12
+LABEL_FONT_WEIGHT = 'bold'
+
 def create_dual_axis_chart(df, symbol):
     """生成一个双轴 Altair 图表，X 轴按等距索引显示数据点。"""
     
-    # 移除时间格式转换，但保留时间字段用于 Tooltip
-    # df['time'] = pd.to_datetime(df['time']) 
-    
-    # 【关键修正 1】：移除重采样/填充逻辑 (不再需要)
-    # if not df.empty:
-    #     df = df.set_index('time')
-    #     df = df.resample('1T').ffill()
-    #     df = df.reset_index()
-
-    # 【关键修正 2】：创建等距索引列
     if not df.empty:
         df['index'] = range(len(df))
     
-    # Tooltip 格式化设置：
-    # 我们希望 Tooltip 仍然显示真实时间，所以 time 必须是 datetime 类型
     if 'time' in df.columns:
         df['time'] = pd.to_datetime(df['time'])
 
@@ -142,7 +134,6 @@ def create_dual_axis_chart(df, symbol):
     
     # 1. 定义基础图表
     base = alt.Chart(df).encode(
-        # 【关键修正 3】：X 轴使用索引 'index'，类型设为定量 (Q)，并隐藏标题
         alt.X('index', title=None, axis=alt.Axis(labels=False))
     )
     
@@ -150,10 +141,12 @@ def create_dual_axis_chart(df, symbol):
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
-                  title='',        #标记价格 (USDC)
+                  title='标记价格 (USDC)',
                   titleColor='#d62728',
                   orient='right',
-                  offset=0
+                  offset=0,
+                  labelFontWeight=LABEL_FONT_WEIGHT,
+                  labelFontSize=LABEL_FONT_SIZE
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
@@ -168,7 +161,9 @@ def create_dual_axis_chart(df, symbol):
                   titleColor='purple',
                   orient='right',
                   offset=30, 
-                  labelExpr=axis_format_logic
+                  labelExpr=axis_format_logic,
+                  labelFontWeight=LABEL_FONT_WEIGHT,
+                  labelFontSize=LABEL_FONT_SIZE
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
@@ -182,14 +177,15 @@ def create_dual_axis_chart(df, symbol):
     ).resolve_scale(
         y='independent'
     ).properties(
-        title=alt.Title(f"{symbol}", anchor='middle',fontSize=24,fontWeight='bold'),
+        # *** 关键修改：移除 Altair 标题，由 Streamlit Markdown 替代 ***
+        title=None, 
         height=400 
     )
 
     st.altair_chart(chart, use_container_width=True)
 
 
-# --- D. UI 渲染：主应用逻辑 (保持不变) ---
+# --- D. UI 渲染：主应用逻辑 (修改为使用 Markdown + 超链接) ---
 
 def main_app():
     # 页面配置和标题
@@ -209,7 +205,20 @@ def main_app():
     for rank, symbol in enumerate(sorted_symbols, 1):
         
         # 默认展开前 100 名的图表
-        with st.expander(f"**#{rank}： {symbol}**", expanded=(rank <= 100)): 
+        # 创建可点击的 Expander 标题，并添加 OI/价格图表的链接
+        coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
+        # 使用 markdown 和 HTML <a> 标签创建大号、粗体、可点击的标题
+        # 字体大小使用 style="font-size:24px;" 
+        expander_title_html = (
+            f'<a href="{coinglass_url}" target="_blank" '
+            f'style="text-decoration:none; color:inherit; font-weight:bold; font-size:24px;">'
+            f'#{rank}： {symbol} 价格与未平仓量 (点击查看 Coinglass)</a>'
+        )
+        
+        # 使用 Markdown 配合 unsafe_allow_html=True 来渲染 HTML 标题
+        st.markdown(expander_title_html, unsafe_allow_html=True)
+        
+        with st.expander("点击展开/折叠图表", expanded=(rank <= 100)): 
             
             # 2a. 读取数据
             data_df = fetch_data_for_symbol(symbol)
@@ -222,6 +231,7 @@ def main_app():
                 st.markdown("---") 
             else:
                 st.warning(f"⚠️ 警告：合约 {symbol} 尚未采集到数据或查询失败。")
+                st.markdown("---")
 
 
 if __name__ == '__main__':
