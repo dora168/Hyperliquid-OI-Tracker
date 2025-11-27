@@ -3,7 +3,7 @@ import pandas as pd
 import altair as alt
 import pymysql
 import os
-import time
+import time # 确保 time 模块已导入
 
 # --- A. 数据库连接配置 (用于 Streamlit Cloud 部署) ---
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
@@ -16,11 +16,15 @@ NEW_DB_NAME = 'open_interest_db'
 TABLE_NAME = 'hyperliquid' 
 DATA_LIMIT = 4000 
 
-# --- B. 数据读取和排序函数 (保持不变) ---
+# 定义重试次数和间隔
+MAX_RETRIES = 3
+RETRY_DELAY = 5 # 秒
+
+# --- B. 数据读取和排序函数 ---
 
 @st.cache_resource(ttl=3600)
 def get_db_connection_params():
-    """返回数据库连接所需的参数字典。"""
+    """返回数据库连接所需的参数字典，并设置连接超时。"""
     if not DB_PASSWORD:
         st.error("❌ 数据库密码未配置。请检查 Streamlit Secrets 或本地 secrets.toml 文件。")
         st.stop()
@@ -32,8 +36,25 @@ def get_db_connection_params():
         'password': DB_PASSWORD,
         'db': NEW_DB_NAME,
         'charset': DB_CHARSET,
-        'autocommit': True 
+        'autocommit': True,
+        'connect_timeout': 10 # 【添加连接超时设置，避免无限等待】
     }
+
+def connect_with_retry(params):
+    """尝试连接数据库，如果失败（如超时）则重试 MAX_RETRIES 次。"""
+    for attempt in range(MAX_RETRIES):
+        try:
+            conn = pymysql.connect(**params)
+            return conn
+        except pymysql.err.OperationalError as e:
+            # 捕获连接失败或超时错误
+            if (2003 in e.args or "timed out" in str(e)) and attempt < MAX_RETRIES - 1:
+                st.warning(f"⚠️ 数据库连接超时，尝试重试 {attempt + 1}/{MAX_RETRIES} 次...")
+                time.sleep(RETRY_DELAY)
+            else:
+                # 如果是最后一次尝试，或不是连接超时错误，则抛出异常
+                raise e
+    return None
 
 @st.cache_data(ttl=60)
 def get_sorted_symbols_by_oi_usd():
@@ -43,8 +64,12 @@ def get_sorted_symbols_by_oi_usd():
 
     conn = None
     try:
-        conn = pymysql.connect(**params)
-        
+        # 【使用带重试的连接】
+        conn = connect_with_retry(params)
+        if conn is None:
+            st.error("❌ 数据库连接重试失败，无法获取和排序合约列表。")
+            return []
+            
         sql_query = f"""
         SELECT 
             t1.symbol, 
@@ -68,6 +93,7 @@ def get_sorted_symbols_by_oi_usd():
         return df_oi_rank['symbol'].tolist()
         
     except Exception as e:
+        # 抛出具体的错误信息
         st.error(f"❌ 无法获取和排序合约列表: {e}")
         return []
     finally:
@@ -82,8 +108,12 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
 
     conn = None
     try:
-        conn = pymysql.connect(**params)
-        
+        # 【使用带重试的连接】
+        conn = connect_with_retry(params)
+        if conn is None:
+            st.warning(f"⚠️ 查询 {symbol} 数据失败: 数据库连接重试失败。")
+            return pd.DataFrame()
+
         sql_query = f"""
         SELECT `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
         FROM `{TABLE_NAME}`
@@ -103,7 +133,8 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (X 轴按等距索引显示) ---
+# --- C. 核心绘图函数 (保持不变) ---
+# ... (create_dual_axis_chart 函数保持不变) ...
 
 # Y 轴自定义格式逻辑 (Vega Expression)
 axis_format_logic = """
@@ -141,7 +172,7 @@ def create_dual_axis_chart(df, symbol):
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
-                  title='',
+                  title='标记价格 (USDC)',
                   titleColor='#d62728',
                   orient='right',
                   offset=0,
@@ -160,7 +191,7 @@ def create_dual_axis_chart(df, symbol):
                   title='未平仓量', 
                   titleColor='purple',
                   orient='right',
-                  offset= 45, 
+                  offset= 70, # 使用 70 避免重叠
                   labelExpr=axis_format_logic,
                   labelFontWeight=LABEL_FONT_WEIGHT,
                   labelFontSize=LABEL_FONT_SIZE
@@ -177,15 +208,12 @@ def create_dual_axis_chart(df, symbol):
     ).resolve_scale(
         y='independent'
     ).properties(
-        # 【修正】将 title=None 替换为 title='' (空字符串) 或完全省略。
         title='', 
         height=400 
     )
 
     st.altair_chart(chart, use_container_width=True)
 
-
-# --- D. UI 渲染：主应用逻辑 (修改为使用 Markdown + 超链接) ---
 
 # --- D. UI 渲染：主应用逻辑 (修改为使用 Markdown + 超链接) ---
 
@@ -200,7 +228,7 @@ def main_app():
     sorted_symbols = get_sorted_symbols_by_oi_usd()
     
     if not sorted_symbols:
-        st.error("无法获取合约列表。请检查数据库连接和 Hyperliquid 表中是否有数据。")
+        # 如果 get_sorted_symbols_by_oi_usd() 已经打印了错误信息，这里可以只 stop
         st.stop()
 
     # 2. 循环遍历并绘制所有合约的图表
@@ -241,3 +269,4 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
