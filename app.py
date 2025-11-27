@@ -6,6 +6,7 @@ import os
 import time
 
 # --- A. 数据库连接配置 (用于 Streamlit Cloud 部署) ---
+# 确保在 Streamlit Cloud 的 Secrets 中设置了 DB_HOST, DB_PORT, DB_USER, DB_PASSWORD
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
@@ -36,29 +37,27 @@ def get_db_connection():
         st.stop()
         return None
 
-# 2. 获取所有合约及其最新 OI_USD 的函数，用于排名 (在 Pandas 中计算)
+# 2. 获取所有合约及其最新 OI 的函数，用于排名
 @st.cache_data(ttl=60)
-def get_sorted_symbols_by_oi_usd():
-    """
-    获取所有合约的最新 OI 和 Price，在 Python 中计算 OI_USD，并按其降序排列。
-    """
+def get_sorted_symbols_by_oi():
+    """获取所有合约的最新 OI 值，并返回一个按 OI 降序排列的合约列表。"""
     conn = get_db_connection()
     if conn is None: return []
 
     try:
-        # SQL 查询：获取每个合约的最新记录的 symbol, oi, 和 price
+        # SQL 查询：获取每个合约的最新记录的 OI 值，并按 OI 降序排列
         sql_query = f"""
         SELECT 
             t1.symbol, 
-            t1.oi,
-            t1.price 
+            t1.oi  # 假设 oi 字段是 USD 计价的未平仓量
         FROM `{TABLE_NAME}` t1
         INNER JOIN (
             SELECT symbol, MAX(time) as max_time
             FROM `{TABLE_NAME}`
             GROUP BY symbol
         ) t2 
-        ON t1.symbol = t2.symbol AND t1.time = t2.max_time;
+        ON t1.symbol = t2.symbol AND t1.time = t2.max_time
+        ORDER BY t1.oi DESC;
         """
         
         df_oi_rank = pd.read_sql(sql_query, conn)
@@ -67,30 +66,23 @@ def get_sorted_symbols_by_oi_usd():
             st.error("数据库中没有找到任何合约的最新数据。")
             return []
 
-        # 核心步骤：在 Python/Pandas 中计算 OI_USD
-        df_oi_rank['oi_usd'] = df_oi_rank['oi'] * df_oi_rank['price']
-
-        # 按 oi_usd 降序排列并返回 symbol 列表
-        df_oi_rank = df_oi_rank.sort_values(by='oi_usd', ascending=False)
+        # 返回按 oi 降序排列的 symbol 列表
         return df_oi_rank['symbol'].tolist()
         
     except Exception as e:
         st.error(f"❌ 无法获取和排序合约列表: {e}")
         return []
 
-# 3. 读取指定合约数据 (在 Pandas 中计算 OI_USD 用于绘图)
+# 3. 读取指定合约数据
 @st.cache_data(ttl=60)
 def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
-    """
-    从数据库中读取指定 symbol 的最新数据，并在 Python 中计算 OI_USD 用于绘图。
-    """
+    """从数据库中读取指定 symbol 的最新数据"""
     conn = get_db_connection()
     if conn is None: return pd.DataFrame()
 
     try:
-        # SQL 查询：必须同时获取 oi 和 price
         sql_query = f"""
-        SELECT `time`, `price` AS `标记价格 (USDC)`, `oi`
+        SELECT `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
         FROM `{TABLE_NAME}`
         WHERE `symbol` = %s
         ORDER BY `time` DESC
@@ -98,12 +90,6 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
         """
         df = pd.read_sql(sql_query, conn, params=(symbol, limit))
         df = df.sort_values('time', ascending=True)
-
-        # 核心步骤：在 Python/Pandas 中计算 OI_USD，并命名为 '未平仓量' 供 Altair 使用
-        df['未平仓量'] = df['oi'] * df['标记价格 (USDC)']
-        # 移除原始 oi 列
-        df = df.drop(columns=['oi'])
-
         return df
 
     except Exception as e:
@@ -111,7 +97,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
         return pd.DataFrame()
 
 
-# --- C. 核心绘图函数 (无需修改) ---
+# --- C. 核心绘图函数 ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)，用于 OI (未平仓量)
 axis_format_logic = """
@@ -122,8 +108,9 @@ datum.value
 """
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，X轴使用时间，Y轴使用价格和未平仓量 (OI_USD)"""
+    """生成一个双轴 Altair 图表，X轴使用时间，Y轴使用价格和未平仓量"""
     
+    # 确保时间列是日期时间类型，才能正确在X轴显示
     df['time'] = pd.to_datetime(df['time'])
     
     base = alt.Chart(df).encode(
@@ -143,11 +130,11 @@ def create_dual_axis_chart(df, symbol):
         )
     )
 
-    # 未平仓量 (OI_USD) (右轴偏移，紫色，K/M/B 格式)
+    # 未平仓量 (右轴偏移，紫色，K/M/B 格式)
     line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
-        alt.Y('未平仓量', # 此列现在包含 OI * Price
+        alt.Y('未平仓量',
               axis=alt.Axis(
-                  title='未平仓量 (USD)', # 标题略作修改，更准确
+                  title='未平仓量',
                   titleColor='purple',
                   orient='right',
                   offset=30,
@@ -160,14 +147,14 @@ def create_dual_axis_chart(df, symbol):
     chart = alt.layer(line_price, line_oi).resolve_scale(
         y='independent'
     ).properties(
-        title=alt.Title(f"{symbol} 价格与未平仓量 (USD)", anchor='middle'),
-        height=400 
+        title=alt.Title(f"{symbol} 价格与未平仓量", anchor='middle'),
+        height=400 # 优化高度以容纳多图
     )
 
     st.altair_chart(chart, use_container_width=True)
 
 
-# --- D. UI 渲染：主应用逻辑 ---
+# --- D. UI 渲染：主应用逻辑 (一次性展示并默认展开前 100) ---
 
 def main_app():
     # 页面配置和标题
@@ -175,9 +162,9 @@ def main_app():
     st.title("✅ Hyperliquid 合约未平仓量实时监控")
     st.markdown("---") 
     
-    # 1. 获取并排序所有合约列表 (现在使用 oi_usd 进行排序)
-    st.header("📉 合约热度排名 (按最新未平仓量/OI_USD 降序)")
-    sorted_symbols = get_sorted_symbols_by_oi_usd()
+    # 1. 获取并排序所有合约列表
+    st.header("📉 合约热度排名 (按最新未平仓量降序)")
+    sorted_symbols = get_sorted_symbols_by_oi()
     
     if not sorted_symbols:
         st.error("无法获取合约列表。请检查数据库连接和 Hyperliquid 表中是否有数据。")
@@ -189,15 +176,15 @@ def main_app():
         # 默认展开前 100 名的图表
         with st.expander(f"**#{rank}： {symbol}**", expanded=(rank <= 100)): 
             
-            # 2a. 读取数据 (计算 OI_USD)
+            # 2a. 读取数据
             data_df = fetch_data_for_symbol(symbol)
             
             if not data_df.empty:
                 # 2b. 绘制图表
                 create_dual_axis_chart(data_df, symbol)
                 
-                # 仅保留分隔线
-                st.markdown("---") 
+                # *** 移除的数据预览部分 ***
+                st.markdown("---") # 仅保留分隔线
             else:
                 st.warning(f"⚠️ 警告：合约 {symbol} 尚未采集到数据或查询失败。")
 
