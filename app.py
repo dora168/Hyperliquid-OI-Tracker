@@ -212,13 +212,13 @@ def main_app():
         expander_title_html = (
             f'<a href="{coinglass_url}" target="_blank" '
             f'style="text-decoration:none; color:inherit; font-weight:bold; font-size:24px;">'
-            f'#{rank}： {symbol} 价格与未平仓量 (点击查看 Coinglass)</a>'
+            f'#{rank}： {symbol} </a>'
         )
         
         # 使用 Markdown 配合 unsafe_allow_html=True 来渲染 HTML 标题
         st.markdown(expander_title_html, unsafe_allow_html=True)
         
-        with st.expander("点击展开/折叠图表", expanded=(rank <= 100)): 
+        with st.expander("", expanded=(rank <= 100)): 
             
             # 2a. 读取数据
             data_df = fetch_data_for_symbol(symbol)
@@ -236,6 +236,7 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
 
