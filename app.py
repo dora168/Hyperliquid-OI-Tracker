@@ -103,7 +103,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (恢复偏移量，移除交互元素) ---
+# --- C. 核心绘图函数 (将标签从 OI_USD 改为 OI) ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)，用于 OI (未平仓量)
 axis_format_logic = """
@@ -122,11 +122,12 @@ def create_dual_axis_chart(df, symbol):
         alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
     )
 
-    # Tooltip 格式化设置 (保持 Tooltip 功能不变)：
+    # Tooltip 格式化设置：
     tooltip_fields = [
         alt.Tooltip('time', title='时间', format="%Y-%m-%d %H:%M:%S"),
         alt.Tooltip('标记价格 (USDC)', title='标记价格', format='$,.4f'),
-        alt.Tooltip('未平仓量', title='OI (USD)', format='$,.0f')
+        # 【关键修正】：将 Tooltip 提示中的 OI (USD) 改为 OI
+        alt.Tooltip('未平仓量', title='OI', format='$,.0f')
     ]
     
     # 2. 标记价格 (右轴，红色)
@@ -136,41 +137,40 @@ def create_dual_axis_chart(df, symbol):
                   title='标记价格 (USDC)',
                   titleColor='#d62728',
                   orient='right',
-                  offset=0 # 保持 0 偏移
+                  offset=0
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
-        # 添加 Tooltip
         tooltip=tooltip_fields
-    ) # 移除了 .add_params(nearest)
+    )
 
     # 3. 未平仓量 (OI_USD) (右轴偏移，紫色)
     line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
         alt.Y('未平仓量',
               axis=alt.Axis(
-                  title='未平仓量 (USD)', 
+                  # 【关键修正】：将 Y 轴标题中的 未平仓量 (USD) 改为 未平仓量
+                  title='未平仓量', 
                   titleColor='purple',
                   orient='right',
-                  # 【关键修正】：恢复偏移量为 30
                   offset=30, 
                   labelExpr=axis_format_logic
               ),
               scale=alt.Scale(zero=False, padding=10)
         ),
-        # 添加 Tooltip
         tooltip=tooltip_fields
-    ) # 移除了 .add_params(nearest)
+    )
     
-    # 4. 组合图表 (移除了 rulers 和 points 层)
+    # 4. 组合图表
     chart = alt.layer(
         line_price, 
         line_oi
     ).resolve_scale(
         y='independent'
     ).properties(
-        title=alt.Title(f"{symbol} 价格与未平仓量 (USD)", anchor='middle'),
+        # 【关键修正】：将图表标题中的 OI (USD) 改为 OI
+        title=alt.Title(f"{symbol} 价格与未平仓量", anchor='middle'),
         height=400 
-    ) # 移除了 .interactive()
+    )
 
     st.altair_chart(chart, use_container_width=True)
 
@@ -184,7 +184,8 @@ def main_app():
     st.markdown("---") 
     
     # 1. 获取并排序所有合约列表
-    # st.header("📉 合约热度排名 (按最新未平仓量/OI_USD 降序)")
+    # 【注意】这里的排名标题仍保持 OI/OI_USD 以说明排序标准是 USD 价值
+    st.header("📉 合约热度排名 (按最新未平仓量/OI_USD 降序)")
     sorted_symbols = get_sorted_symbols_by_oi_usd()
     
     if not sorted_symbols:
