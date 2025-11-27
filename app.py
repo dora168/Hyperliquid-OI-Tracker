@@ -84,7 +84,6 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     try:
         conn = pymysql.connect(**params)
         
-        # SQL 查询：使用 oi 字段
         sql_query = f"""
         SELECT `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
         FROM `{TABLE_NAME}`
@@ -104,7 +103,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (数据连接/填充逻辑是关键) ---
+# --- C. 核心绘图函数 (X 轴按等距索引显示) ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)
 axis_format_logic = """
@@ -115,21 +114,26 @@ format(datum.value, ',.0f')
 """
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，使用 Pandas 重采样和填充来连接数据。"""
+    """生成一个双轴 Altair 图表，X 轴按等距索引显示数据点。"""
     
-    df['time'] = pd.to_datetime(df['time'])
+    # 移除时间格式转换，但保留时间字段用于 Tooltip
+    # df['time'] = pd.to_datetime(df['time']) 
     
-    # 【关键解决空白问题】：数据填充和重采样逻辑
+    # 【关键修正 1】：移除重采样/填充逻辑 (不再需要)
+    # if not df.empty:
+    #     df = df.set_index('time')
+    #     df = df.resample('1T').ffill()
+    #     df = df.reset_index()
+
+    # 【关键修正 2】：创建等距索引列
     if not df.empty:
-        # 将 time 设为索引
-        df = df.set_index('time')
-        # 重采样到 1 分钟间隔 ('1T')，使用前一个有效值进行填充 ('ffill')
-        # 这确保了线图是连续的，缺失的数据点被前一个值代替
-        df = df.resample('1T').ffill()
-        # 重置索引，将 time 变回普通列
-        df = df.reset_index()
+        df['index'] = range(len(df))
     
     # Tooltip 格式化设置：
+    # 我们希望 Tooltip 仍然显示真实时间，所以 time 必须是 datetime 类型
+    if 'time' in df.columns:
+        df['time'] = pd.to_datetime(df['time'])
+
     tooltip_fields = [
         alt.Tooltip('time', title='时间', format="%Y-%m-%d %H:%M:%S"),
         alt.Tooltip('标记价格 (USDC)', title='标记价格', format='$,.4f'),
@@ -138,9 +142,10 @@ def create_dual_axis_chart(df, symbol):
     
     # 1. 定义基础图表
     base = alt.Chart(df).encode(
-        alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
+        # 【关键修正 3】：X 轴使用索引 'index'，类型设为定量 (Q)，并隐藏标题
+        alt.X('index', title=None, axis=alt.Axis(labels=False))
     )
-
+    
     # 2. 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
