@@ -222,9 +222,9 @@ def main_app():
                 st.markdown("---") 
             else:
                 st.warning(f"⚠️ 警告：合约 {symbol} 尚未采集到数据或查询失败。")
-
-
 if __name__ == '__main__':
     main_app()
+
+
 
 
