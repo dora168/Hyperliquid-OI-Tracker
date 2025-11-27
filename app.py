@@ -166,7 +166,7 @@ def create_dual_axis_chart(df, symbol):
                   title='未平仓量', 
                   titleColor='purple',
                   orient='right',
-                  offset=45,      # 使用 70 避免重叠
+                  offset=30,      # 使用 70 避免重叠
                   labelExpr=axis_format_logic,
                   labelFontWeight=LABEL_FONT_WEIGHT,
                   labelFontSize=LABEL_FONT_SIZE
@@ -280,6 +280,7 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
 
