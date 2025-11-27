@@ -4,7 +4,7 @@ import pymysql.cursors
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
+# 强制重新部署 20251127
 # -------------------------------------------------------------------------
 #                          A. 数据库连接配置 (请确保与采集代码一致)
 # -------------------------------------------------------------------------
@@ -122,4 +122,5 @@ def main_app():
 
 # 运行应用
 if __name__ == '__main__':
+
     main_app()
