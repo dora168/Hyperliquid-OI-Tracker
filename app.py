@@ -177,8 +177,8 @@ def create_dual_axis_chart(df, symbol):
     ).resolve_scale(
         y='independent'
     ).properties(
-        # *** 关键修改：移除 Altair 标题，由 Streamlit Markdown 替代 ***
-        title=None, 
+        # 【修正】将 title=None 替换为 title='' (空字符串) 或完全省略。
+        title='', 
         height=400 
     )
 
@@ -236,6 +236,7 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
 
