@@ -237,7 +237,6 @@ def main_app():
     for rank, symbol in enumerate(sorted_symbols, 1):
         
         # 2a. 创建两列布局
-        # col1 用于 Hyperliquid，col2 用于 Binance，比例 1:1
         col1, col2 = st.columns(2) 
         
         # --- 左列：Hyperliquid 图表 ---
@@ -253,28 +252,27 @@ def main_app():
             )
             st.markdown(expander_title_html, unsafe_allow_html=True)
             
-            # Expander 和图表绘制
-            with st.expander("", expanded=(rank <= 100)): 
-                data_df = fetch_data_for_symbol(symbol)
-                
-                if not data_df.empty:
-                    create_dual_axis_chart(data_df, symbol)
-                else:
-                    st.warning(f"⚠️ 警告：Hyperliquid {symbol} 数据采集失败。")
+            # 【核心修改点 1：移除 st.expander 代码块】
+            
+            # 2b. 读取和绘制数据
+            data_df = fetch_data_for_symbol(symbol)
+            
+            if not data_df.empty:
+                create_dual_axis_chart(data_df, symbol)
+            else:
+                st.warning(f"⚠️ 警告：Hyperliquid {symbol} 数据采集失败。")
 
         # --- 右列：币安图表 ---
         with col2:
-            # 标题
+            # 标题 (保持居中)
             st.markdown(f'<div style="text-align: center; font-weight:bold; font-size:24px;">'
                         f'#{rank}： {symbol} (Binance)</div>', unsafe_allow_html=True)
 
-            # Expander 和图表绘制
-            with st.expander("", expanded=(rank <= 100)):
-                # 【TODO】此处需要修改为实际的币安数据获取逻辑
-                binance_df = fetch_binance_data_for_symbol(symbol)
-                
-                # 【TODO】此处需要修改为实际的币安图表绘制逻辑
-                create_binance_chart(binance_df, symbol)
+            # 【核心修改点 2：移除 st.expander 代码块】
+            
+            # 2c. 读取和绘制币安数据 (占位逻辑)
+            binance_df = fetch_binance_data_for_symbol(symbol)
+            create_binance_chart(binance_df, symbol)
         
         # 在两列下方添加一个分隔线
         st.markdown("---") 
@@ -282,6 +280,7 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
 
