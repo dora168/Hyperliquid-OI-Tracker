@@ -84,6 +84,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     try:
         conn = pymysql.connect(**params)
         
+        # SQL 查询：使用 oi 字段
         sql_query = f"""
         SELECT `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
         FROM `{TABLE_NAME}`
@@ -103,7 +104,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (添加数据连接/填充逻辑) ---
+# --- C. 核心绘图函数 (数据连接/填充逻辑是关键) ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)
 axis_format_logic = """
@@ -118,7 +119,7 @@ def create_dual_axis_chart(df, symbol):
     
     df['time'] = pd.to_datetime(df['time'])
     
-    # 【关键修正】：数据填充和重采样逻辑
+    # 【关键解决空白问题】：数据填充和重采样逻辑
     if not df.empty:
         # 将 time 设为索引
         df = df.set_index('time')
@@ -127,7 +128,7 @@ def create_dual_axis_chart(df, symbol):
         df = df.resample('1T').ffill()
         # 重置索引，将 time 变回普通列
         df = df.reset_index()
-
+    
     # Tooltip 格式化设置：
     tooltip_fields = [
         alt.Tooltip('time', title='时间', format="%Y-%m-%d %H:%M:%S"),
