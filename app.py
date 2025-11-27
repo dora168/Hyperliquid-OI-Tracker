@@ -13,14 +13,12 @@ DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None)
 
 DB_CHARSET = 'utf8mb4'
 NEW_DB_NAME = 'open_interest_db'
-# 【修正】根据截图，表名应为小写
 TABLE_NAME = 'hyperliquid' 
 DATA_LIMIT = 4000 # 读取每个合约历史记录的行数限制
 
-# --- B. 数据读取和排序函数 ---
+# --- B. 数据读取和排序函数 (保持不变) ---
 
-# 1. 缓存数据库连接资源 (返回连接参数，而不是连接对象本身)
-# ❗️ 为了避免 Streamlit Cloud 缓存数据库连接对象时出错，我们缓存连接参数
+# 1. 缓存数据库连接参数 (避免 Streamlit Cloud 缓存连接对象时出错)
 @st.cache_resource(ttl=3600)
 def get_db_connection_params():
     """返回数据库连接所需的参数字典。"""
@@ -35,10 +33,10 @@ def get_db_connection_params():
         'password': DB_PASSWORD,
         'db': NEW_DB_NAME,
         'charset': DB_CHARSET,
-        'autocommit': True  # 【关键修正】设置 autocommit=True，避免事务回滚问题
+        'autocommit': True 
     }
 
-# 2. 【已修改】获取所有合约及其最新 OI_USD 的函数，用于排名
+# 2. 获取所有合约及其最新 OI_USD 的函数，用于排名
 @st.cache_data(ttl=60)
 def get_sorted_symbols_by_oi_usd():
     """
@@ -49,10 +47,8 @@ def get_sorted_symbols_by_oi_usd():
 
     conn = None
     try:
-        # 使用 pymysql 连接，并设置 autocommit=True
         conn = pymysql.connect(**params)
         
-        # SQL 查询：基于 t1.oi_usd 字段进行排序
         sql_query = f"""
         SELECT 
             t1.symbol, 
@@ -73,7 +69,6 @@ def get_sorted_symbols_by_oi_usd():
             st.error("数据库中没有找到任何合约的最新数据。")
             return []
 
-        # 返回按 oi_usd 降序排列的 symbol 列表
         return df_oi_rank['symbol'].tolist()
         
     except Exception as e:
@@ -83,7 +78,7 @@ def get_sorted_symbols_by_oi_usd():
         if conn:
             conn.close()
 
-# 3. 【已修改】读取指定合约数据 (用于绘图)
+# 3. 读取指定合约数据 (用于绘图)
 @st.cache_data(ttl=60)
 def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
     """从数据库中读取指定 symbol 的最新数据，并使用 oi_usd 字段。"""
@@ -92,7 +87,6 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
 
     conn = None
     try:
-        # 使用 pymysql 连接，并设置 autocommit=True
         conn = pymysql.connect(**params)
         
         # SQL 查询：直接读取 oi_usd 并将其命名为 '未平仓量'
@@ -115,7 +109,7 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
             conn.close()
 
 
-# --- C. 核心绘图函数 (保持不变) ---
+# --- C. 核心绘图函数 (添加 Tooltip) ---
 
 # Y 轴自定义格式逻辑 (Vega Expression)，用于 OI (未平仓量)
 axis_format_logic = """
@@ -126,14 +120,31 @@ datum.value
 """
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，X轴使用时间，Y轴使用价格和未平仓量 (OI_USD)"""
+    """生成一个双轴 Altair 图表，添加了 Tooltip 和交互层。"""
     
     df['time'] = pd.to_datetime(df['time'])
     
+    # 1. 定义基础图表和 Selection
     base = alt.Chart(df).encode(
         alt.X('time', title='时间', axis=alt.Axis(format="%m-%d %H:%M"))
     )
 
+    # Tooltip 格式化设置：
+    tooltip_fields = [
+        alt.Tooltip('time', title='时间', format="%Y-%m-%d %H:%M:%S"),
+        alt.Tooltip('标记价格 (USDC)', title='标记价格', format='$,.4f'),
+        alt.Tooltip('未平仓量', title='OI (USD)', format='$,.0f')
+    ]
+    
+    # 定义 Selection，用于捕获最近的点
+    nearest = alt.selection_point(
+        on='mouseover', 
+        nearest=True, 
+        fields=['time'], 
+        empty='none'
+    )
+
+    # 2. 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)',
               axis=alt.Axis(
@@ -143,9 +154,13 @@ def create_dual_axis_chart(df, symbol):
                   offset=0
               ),
               scale=alt.Scale(zero=False, padding=10)
-        )
-    )
+        ),
+        # 添加 Tooltip
+        tooltip=tooltip_fields
+    ).add_params(nearest)
 
+
+    # 3. 未平仓量 (OI_USD) (右轴偏移，紫色)
     line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
         alt.Y('未平仓量',
               axis=alt.Axis(
@@ -156,15 +171,36 @@ def create_dual_axis_chart(df, symbol):
                   labelExpr=axis_format_logic
               ),
               scale=alt.Scale(zero=False, padding=10)
-        )
+        ),
+        # 添加 Tooltip
+        tooltip=tooltip_fields
+    ).add_params(nearest)
+    
+    # 4. 创建交互层 (透明点和规则线)
+    # 绘制不可见的点，以便 nearest selection 能够捕获到数据点
+    points = line_price.mark_point().encode(
+        opacity=alt.value(0) # 使点透明
     )
 
-    chart = alt.layer(line_price, line_oi).resolve_scale(
+    # 绘制垂直规则线
+    rulers = alt.Chart(df).mark_rule(color='gray', strokeDash=[3, 3]).encode(
+        x='time',
+        # 根据 selection 调整规则线的透明度，当 selection 激活时显示
+        opacity=alt.condition(nearest, alt.value(0.7), alt.value(0)) 
+    ).add_params(nearest)
+
+    # 5. 组合图表
+    chart = alt.layer(
+        rulers, # 规则线在最底层
+        line_price, 
+        line_oi,
+        points # 透明点在最上层，方便鼠标捕获
+    ).resolve_scale(
         y='independent'
     ).properties(
         title=alt.Title(f"{symbol} 价格与未平仓量 (USD)", anchor='middle'),
         height=400 
-    )
+    ).interactive() # 允许图表进行缩放和平移
 
     st.altair_chart(chart, use_container_width=True)
 
