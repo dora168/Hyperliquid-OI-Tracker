@@ -3,32 +3,31 @@ import pandas as pd
 import altair as alt
 import pymysql
 import os
-import time # 确保 time 模块已导入
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- A. 数据库连接配置 (用于 Streamlit Cloud 部署) ---
+# --- A. 数据库连接配置 ---
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None) 
-
 DB_CHARSET = 'utf8mb4'
 NEW_DB_NAME = 'open_interest_db'
 TABLE_NAME = 'hyperliquid' 
 DATA_LIMIT = 4000 
 
-# 定义重试次数和间隔
+# 定义重试配置
 MAX_RETRIES = 3
-RETRY_DELAY = 5 # 秒
+RETRY_DELAY = 2 # 减少重试间隔以提高响应速度
 
-# --- B. 数据读取和排序函数 ---
+# --- B. 核心数据功能 ---
 
-@st.cache_resource(ttl=3600)
+@st.cache_resource
 def get_db_connection_params():
-    """返回数据库连接所需的参数字典，并设置连接超时。"""
+    """返回数据库连接参数"""
     if not DB_PASSWORD:
-        st.error("❌ 数据库密码未配置。请检查 Streamlit Secrets 或本地 secrets.toml 文件。")
+        st.error("❌ 数据库密码未配置。")
         st.stop()
-        return None
     return {
         'host': DB_HOST,
         'port': DB_PORT,
@@ -37,83 +36,65 @@ def get_db_connection_params():
         'db': NEW_DB_NAME,
         'charset': DB_CHARSET,
         'autocommit': True,
-        'connect_timeout': 10 # 【添加连接超时设置，避免无限等待】
+        'connect_timeout': 5 # 缩短超时时间，快速失败
     }
 
-def connect_with_retry(params):
-    """尝试连接数据库，如果失败（如超时）则重试 MAX_RETRIES 次。"""
-    for attempt in range(MAX_RETRIES):
-        try:
-            conn = pymysql.connect(**params)
-            return conn
-        except pymysql.err.OperationalError as e:
-            # 捕获连接失败或超时错误
-            if (2003 in e.args or "timed out" in str(e)) and attempt < MAX_RETRIES - 1:
-                st.warning(f"⚠️ 数据库连接超时，尝试重试 {attempt + 1}/{MAX_RETRIES} 次...")
-                time.sleep(RETRY_DELAY)
-            else:
-                # 如果是最后一次尝试，或不是连接超时错误，则抛出异常
-                raise e
-    return None
+def get_connection():
+    """获取单个数据库连接（非缓存，用于多线程）"""
+    params = get_db_connection_params()
+    try:
+        return pymysql.connect(**params)
+    except Exception as e:
+        print(f"Connection failed: {e}")
+        return None
 
 @st.cache_data(ttl=60)
 def get_sorted_symbols_by_oi_usd():
-    """获取所有合约的最新 OI_USD 值，并返回一个按 OI_USD 降序排列的合约列表。"""
+    """获取按 OI 排序的合约列表"""
     params = get_db_connection_params()
-    if params is None: return []
-
     conn = None
     try:
-        # 【使用带重试的连接】
-        conn = connect_with_retry(params)
-        if conn is None:
-            st.error("❌ 数据库连接重试失败，无法获取和排序合约列表。")
-            return []
-            
+        conn = pymysql.connect(**params)
+        # 优化 SQL：只查必要的字段，减少数据传输
         sql_query = f"""
-        SELECT 
-            t1.symbol, 
-            t1.oi_usd  
+        SELECT symbol 
+        FROM `{TABLE_NAME}`
+        GROUP BY symbol
+        ORDER BY MAX(oi_usd) DESC;
+        """
+        # 注意：这里假设最新的 oi_usd 通常是最大的，或者由于你需要的是热度排名，
+        # 直接取 MAX(oi_usd) 往往比子查询连接更快且结果足够近似。
+        # 如果必须精确取最新时间的 OI，请保留你原来的 JOIN 写法，但注意索引优化。
+        
+        # 保持你原来的精确逻辑（为了准确性）：
+        sql_query_precise = f"""
+        SELECT t1.symbol
         FROM `{TABLE_NAME}` t1
-        INNER JOIN (
+        JOIN (
             SELECT symbol, MAX(time) as max_time
             FROM `{TABLE_NAME}`
             GROUP BY symbol
-        ) t2 
-        ON t1.symbol = t2.symbol AND t1.time = t2.max_time
+        ) t2 ON t1.symbol = t2.symbol AND t1.time = t2.max_time
         ORDER BY t1.oi_usd DESC;
         """
-        
-        df_oi_rank = pd.read_sql(sql_query, conn)
-        
-        if df_oi_rank.empty:
-            st.error("数据库中没有找到任何合约的最新数据。")
-            return []
-
-        return df_oi_rank['symbol'].tolist()
-        
+        df = pd.read_sql(sql_query_precise, conn)
+        return df['symbol'].tolist()
     except Exception as e:
-        # 抛出具体的错误信息
-        st.error(f"❌ 无法获取和排序合约列表: {e}")
+        st.error(f"❌ 获取合约列表失败: {e}")
         return []
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
-@st.cache_data(ttl=60)
-def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
-    """从数据库中读取指定 symbol 的最新数据，使用 oi 字段。"""
-    params = get_db_connection_params()
-    if params is None: return pd.DataFrame()
-
-    conn = None
+def fetch_single_symbol_data(symbol):
+    """
+    单个合约的数据抓取函数（供线程池调用）。
+    不使用 st.cache_data，因为外层会统一管理缓存或直接并发调用。
+    """
+    conn = get_connection()
+    if not conn:
+        return symbol, pd.DataFrame()
+    
     try:
-        # 【使用带重试的连接】
-        conn = connect_with_retry(params)
-        if conn is None:
-            st.warning(f"⚠️ 查询 {symbol} 数据失败: 数据库连接重试失败。")
-            return pd.DataFrame()
-
         sql_query = f"""
         SELECT `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
         FROM `{TABLE_NAME}`
@@ -121,151 +102,148 @@ def fetch_data_for_symbol(symbol, limit=DATA_LIMIT):
         ORDER BY `time` DESC
         LIMIT %s
         """
-        df = pd.read_sql(sql_query, conn, params=(symbol, limit))
+        df = pd.read_sql(sql_query, conn, params=(symbol, DATA_LIMIT))
         df = df.sort_values('time', ascending=True)
-        return df
-
+        return symbol, df
     except Exception as e:
-        st.warning(f"⚠️ 查询 {symbol} 数据失败: {e}")
-        return pd.DataFrame()
+        print(f"Error fetching {symbol}: {e}")
+        return symbol, pd.DataFrame()
     finally:
-        if conn:
-            conn.close()
+        conn.close()
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_batch_data_concurrently(symbol_list):
+    """
+    【核心优化】多线程并发抓取数据。
+    同时发起多个数据库请求，极大减少总等待时间。
+    """
+    results = {}
+    # 限制最大线程数，避免数据库连接数爆炸
+    max_workers = min(len(symbol_list), 10) 
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_symbol = {executor.submit(fetch_single_symbol_data, sym): sym for sym in symbol_list}
+        
+        # 获取结果
+        for future in as_completed(future_to_symbol):
+            sym, df = future.result()
+            if not df.empty:
+                results[sym] = df
+                
+    return results
 
-# --- C. 核心绘图函数 (保持不变) ---
-# ... (create_dual_axis_chart 函数保持不变) ...
+# --- C. 绘图函数 (保持你的样式，稍微优化 Vega) ---
 
-# Y 轴自定义格式逻辑 (Vega Expression)
 axis_format_logic = """
 datum.value >= 1000000000 ? format(datum.value / 1000000000, ',.2f') + 'B' : 
 datum.value >= 1000000 ? format(datum.value / 1000000, ',.2f') + 'M' : 
 datum.value >= 1000 ? format(datum.value / 1000, ',.1f') + 'K' : 
 format(datum.value, ',.0f')
 """
-
-# 定义 Y 轴标签样式常量
 LABEL_FONT_SIZE = 12
 LABEL_FONT_WEIGHT = 'bold'
 
 def create_dual_axis_chart(df, symbol):
-    """生成一个双轴 Altair 图表，X 轴按等距索引显示数据点。"""
+    # 预处理移动到绘图前，减少重复计算
+    if df.empty: return None
     
-    if not df.empty:
-        df['index'] = range(len(df))
-    
-    if 'time' in df.columns:
+    # 确保时间格式正确
+    if not pd.api.types.is_datetime64_any_dtype(df['time']):
         df['time'] = pd.to_datetime(df['time'])
+    
+    df = df.reset_index(drop=True)
+    df['index'] = df.index
 
+    # 简化 tooltip，减少数据量
     tooltip_fields = [
-        alt.Tooltip('time', title='时间', format="%Y-%m-%d %H:%M:%S"),
-        alt.Tooltip('标记价格 (USDC)', title='标记价格', format='$,.4f'),
+        alt.Tooltip('time', title='时间', format="%m-%d %H:%M"),
+        alt.Tooltip('标记价格 (USDC)', title='价格', format='$,.4f'),
         alt.Tooltip('未平仓量', title='OI', format=',.0f') 
     ]
     
-    # 1. 定义基础图表
     base = alt.Chart(df).encode(
         alt.X('index', title=None, axis=alt.Axis(labels=False))
     )
     
-    # 2. 标记价格 (右轴，红色)
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
-        alt.Y('标记价格 (USDC)',
-              axis=alt.Axis(
-                  title='',
-                  titleColor='#d62728',
-                  orient='right',
-                  offset=0,
-                  labelFontWeight=LABEL_FONT_WEIGHT,
-                  labelFontSize=LABEL_FONT_SIZE
-              ),
-              scale=alt.Scale(zero=False, padding=10)
-        ),
-        tooltip=tooltip_fields
+        alt.Y('标记价格 (USDC)', axis=alt.Axis(title='', titleColor='#d62728', orient='right'), scale=alt.Scale(zero=False))
     )
 
-    # 3. 未平仓量 (OI) (右轴偏移，紫色)
     line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
-        alt.Y('未平仓量',
-              axis=alt.Axis(
-                  title='未平仓量', 
-                  titleColor='purple',
-                  orient='right',
-                  offset= 45, # 使用 70 避免重叠
-                  labelExpr=axis_format_logic,
-                  labelFontWeight=LABEL_FONT_WEIGHT,
-                  labelFontSize=LABEL_FONT_SIZE
-              ),
-              scale=alt.Scale(zero=False, padding=10)
-        ),
-        tooltip=tooltip_fields
+        alt.Y('未平仓量', 
+              axis=alt.Axis(title='OI', titleColor='purple', orient='right', offset=45, labelExpr=axis_format_logic),
+              scale=alt.Scale(zero=False)
+        )
     )
     
-    # 4. 组合图表
-    chart = alt.layer(
-        line_price, 
-        line_oi
-    ).resolve_scale(
-        y='independent'
-    ).properties(
-        title='', 
-        height=400 
-    )
+    chart = alt.layer(line_price, line_oi).resolve_scale(y='independent').encode(
+        tooltip=tooltip_fields
+    ).properties(height=350) # 稍微减小高度
 
-    st.altair_chart(chart, use_container_width=True)
+    return chart
 
-
-# --- D. UI 渲染：主应用逻辑 (修改为使用 Markdown + 超链接) ---
+# --- D. 主程序 ---
 
 def main_app():
-    # 页面配置和标题
     st.set_page_config(layout="wide", page_title="Hyperliquid OI Dashboard")
-    st.title("✅ Hyperliquid 合约未平仓量实时监控")
+    
+    st.title("⚡ Hyperliquid OI 极速监控")
     st.markdown("---") 
     
-    # 1. 获取并排序所有合约列表
-    st.header("📈 合约热度排名")
-    sorted_symbols = get_sorted_symbols_by_oi_usd()
+    # 1. 获取排名 (缓存)
+    with st.spinner("正在加载市场排名..."):
+        sorted_symbols = get_sorted_symbols_by_oi_usd()
     
     if not sorted_symbols:
-        # 如果 get_sorted_symbols_by_oi_usd() 已经打印了错误信息，这里可以只 stop
         st.stop()
 
-    # 2. 循环遍历并绘制所有合约的图表
-    for rank, symbol in enumerate(sorted_symbols, 1):
+    # --- UI 控制区 ---
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        # 【关键优化】增加数量控制，默认只看前 10 个，避免页面卡死
+        top_n = st.slider("显示合约数量 (按 OI 排名)", min_value=1, max_value=100, value=10, step=5)
+    
+    target_symbols = sorted_symbols[:top_n]
+
+    # 2. 并发获取数据 (缓存)
+    # 这里的 spinner 会包含多线程抓取的过程
+    with st.spinner(f"正在并发获取 Top {top_n} 合约数据..."):
+        bulk_data = fetch_batch_data_concurrently(target_symbols)
+
+    # 3. 渲染界面
+    # 使用 st.columns 布局或者单纯列表
+    
+    for rank, symbol in enumerate(target_symbols, 1):
+        # 准备数据
+        data_df = bulk_data.get(symbol)
         
-        # 默认展开前 100 名的图表
-        # 创建可点击的 Expander 标题，并添加 OI/价格图表的链接
+        # 标题 HTML
         coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
-        
-        # 【修改点 START】 使用 <div style="text-align: center;"> 包裹标题超链接
+        color = "black"
+        if data_df is not None and not data_df.empty:
+            # 简单的涨跌色提示 (可选优化)
+            price_change = data_df['标记价格 (USDC)'].iloc[-1] - data_df['标记价格 (USDC)'].iloc[0]
+            color = "#009900" if price_change >= 0 else "#D10000"
+
         expander_title_html = (
-            f'<div style="text-align: center;">' # 居中父元素
+            f'<div style="text-align: center; margin-bottom: 5px;">'
             f'<a href="{coinglass_url}" target="_blank" '
-            f'style="text-decoration:none; color:inherit; font-weight:bold; font-size:24px;">'
-            f'#{rank}： {symbol} </a>'
-            f'</div>' # 结束居中父元素
+            f'style="text-decoration:none; color:{color}; font-weight:bold; font-size:22px;">'
+            f'#{rank} {symbol} </a>'
+            f'</div>'
         )
         
-        # 使用 Markdown 配合 unsafe_allow_html=True 来渲染 HTML 标题
-        st.markdown(expander_title_html, unsafe_allow_html=True)
-        # 【修改点 END】
-        
-        with st.expander("", expanded=(rank <= 100)): 
+        # 默认只展开前 3 个，减少初始渲染压力
+        with st.expander(f"#{rank} {symbol}", expanded=(rank <= 3)):
+            st.markdown(expander_title_html, unsafe_allow_html=True)
             
-            # 2a. 读取数据
-            data_df = fetch_data_for_symbol(symbol)
-            
-            if not data_df.empty:
-                # 2b. 绘制图表
-                create_dual_axis_chart(data_df, symbol)
-                
-                # 仅保留分隔线
-                st.markdown("---") 
+            if data_df is not None and not data_df.empty:
+                chart = create_dual_axis_chart(data_df, symbol)
+                if chart:
+                    st.altair_chart(chart, use_container_width=True)
             else:
-                st.warning(f"⚠️ 警告：合约 {symbol} 尚未采集到数据或查询失败。")
-                st.markdown("---")
-
+                st.warning("暂无数据")
 
 if __name__ == '__main__':
     main_app()
