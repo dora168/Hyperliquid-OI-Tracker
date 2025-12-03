@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 import pymysql
 import os
 from contextlib import contextmanager
 
-# --- A. 数据库连接配置 (保持不变) ---
+# --- A. 数据库配置 ---
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
@@ -12,9 +13,9 @@ DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None)
 DB_CHARSET = 'utf8mb4'
 NEW_DB_NAME = 'open_interest_db'
 TABLE_NAME = 'hyperliquid' 
-DATA_LIMIT = 4000 # 获取足够的数据计算涨跌幅，但绘图时我们会抽样
+DATA_LIMIT = 4000 
 
-# --- B. 数据库核心功能 ---
+# --- B. 数据库功能 (单次连接极速版) ---
 
 @st.cache_resource
 def get_db_connection_params():
@@ -43,11 +44,11 @@ def get_connection():
 
 @st.cache_data(ttl=60)
 def get_sorted_symbols_by_oi_usd():
-    """获取按 OI 排序的合约列表"""
+    """获取排名列表"""
     try:
         with get_connection() as conn:
-            sql_query = f"SELECT symbol FROM `{TABLE_NAME}` GROUP BY symbol ORDER BY MAX(oi_usd) DESC;"
-            df = pd.read_sql(sql_query, conn)
+            sql = f"SELECT symbol FROM `{TABLE_NAME}` GROUP BY symbol ORDER BY MAX(oi_usd) DESC;"
+            df = pd.read_sql(sql, conn)
             return df['symbol'].tolist()
     except Exception as e:
         st.error(f"❌ 列表获取失败: {e}")
@@ -55,11 +56,11 @@ def get_sorted_symbols_by_oi_usd():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_bulk_data_one_shot(symbol_list):
-    """单次连接获取所有数据"""
+    """单次查询所有数据 (One-Shot)"""
     if not symbol_list: return {}
     placeholders = ', '.join(['%s'] * len(symbol_list))
     
-    # 获取数据
+    # 使用窗口函数一次性提取 Top N 数据
     sql_query = f"""
     WITH RankedData AS (
         SELECT symbol, `time`, `price`, `oi`,
@@ -67,7 +68,7 @@ def fetch_bulk_data_one_shot(symbol_list):
         FROM `{TABLE_NAME}`
         WHERE symbol IN ({placeholders})
     )
-    SELECT symbol, `time`, `price`, `oi`
+    SELECT symbol, `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
     FROM RankedData
     WHERE rn <= %s
     ORDER BY symbol, `time` ASC;
@@ -76,105 +77,162 @@ def fetch_bulk_data_one_shot(symbol_list):
     try:
         with get_connection() as conn:
             df_all = pd.read_sql(sql_query, conn, params=tuple(symbol_list) + (DATA_LIMIT,))
+        
         if df_all.empty: return {}
+        # 内存分组
         return {sym: group for sym, group in df_all.groupby('symbol')}
     except Exception as e:
         st.error(f"⚠️ 数据查询失败: {e}")
         return {}
 
-# --- C. 数据处理与表格生成 ---
+# --- C. 降采样逻辑 (核心优化) ---
 
-def prepare_dashboard_data(target_symbols, bulk_data):
-    """将原始数据转换为适合表格展示的摘要格式"""
-    dashboard_rows = []
+def downsample_data(df, target_points=150):
+    """
+    【核心优化函数】
+    将 4000 个点的数据压缩到 target_points (默认150个)，
+    极大减轻浏览器绘图压力。
+    """
+    if len(df) <= target_points:
+        return df
     
-    for symbol in target_symbols:
-        df = bulk_data.get(symbol)
-        if df is None or df.empty:
-            continue
-            
-        # 1. 获取当前值
-        current_price = df['price'].iloc[-1]
-        current_oi = df['oi'].iloc[-1]
+    # 计算步长，例如 4000 / 150 ≈ 26，每 26 个点取 1 个
+    step = len(df) // target_points
+    
+    # 简单的切片采样 (Slicing)
+    # 这比聚合计算(mean/max)要快得多，对于展示趋势完全足够
+    df_sampled = df.iloc[::step].copy()
+    
+    # 确保最后一个点（最新数据）被包含进去，否则可能会漏掉最新价格
+    if df.index[-1] not in df_sampled.index:
+        df_sampled = pd.concat([df_sampled, df.iloc[[-1]]])
         
-        # 2. 计算 24H 涨跌幅 (假设数据够多，取最早和最晚对比)
-        # 这里简单用第一条数据做对比，实际应按时间计算
-        start_price = df['price'].iloc[0]
-        price_change_pct = ((current_price - start_price) / start_price) 
-        
-        # 3. 生成迷你图数据 (Downsampling)
-        # 浏览器渲染 4000 个点很慢，我们每隔 40 个点取一个，保留 100 个点，形状是一样的
-        # 这对性能提升至关重要！
-        step = max(1, len(df) // 100) 
-        mini_chart_data = df['price'].iloc[::step].tolist()
-        
-        dashboard_rows.append({
-            "合约": symbol,
-            "价格 (USDC)": current_price,
-            "24H 涨跌幅": price_change_pct,
-            "未平仓量 (OI)": current_oi,
-            "价格走势 (7D)": mini_chart_data, # 列表数据，Streamlit 会自动画成线
-            "链接": f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
-        })
-        
-    return pd.DataFrame(dashboard_rows)
+    return df_sampled
 
-# --- D. 主程序 ---
+# --- D. 绘图函数 ---
+
+axis_format_logic = """
+datum.value >= 1000000000 ? format(datum.value / 1000000000, ',.2f') + 'B' : 
+datum.value >= 1000000 ? format(datum.value / 1000000, ',.2f') + 'M' : 
+datum.value >= 1000 ? format(datum.value / 1000, ',.1f') + 'K' : 
+format(datum.value, ',.0f')
+"""
+
+def create_dual_axis_chart(df, symbol):
+    if df.empty: return None
+    
+    # 确保时间类型
+    if not pd.api.types.is_datetime64_any_dtype(df['time']):
+        df['time'] = pd.to_datetime(df['time'])
+    
+    # 重置索引用于 X 轴绘制
+    df = df.reset_index(drop=True)
+    df['index'] = df.index
+
+    # Tooltip 简化
+    tooltip_fields = [
+        alt.Tooltip('time', title='时间', format="%m-%d %H:%M"),
+        alt.Tooltip('标记价格 (USDC)', title='价格', format='$,.4f'),
+        alt.Tooltip('未平仓量', title='OI', format=',.0f') 
+    ]
+    
+    # 基础图层
+    base = alt.Chart(df).encode(
+        alt.X('index', title=None, axis=alt.Axis(labels=False))
+    )
+    
+    # 价格线 (红)
+    line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
+        alt.Y('标记价格 (USDC)', 
+              axis=alt.Axis(title='', titleColor='#d62728', orient='right'), 
+              scale=alt.Scale(zero=False))
+    )
+
+    # OI 线 (紫)
+    line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
+        alt.Y('未平仓量', 
+              axis=alt.Axis(title='OI', titleColor='purple', orient='right', offset=45, labelExpr=axis_format_logic),
+              scale=alt.Scale(zero=False))
+    )
+    
+    # 组合
+    chart = alt.layer(line_price, line_oi).resolve_scale(y='independent').encode(
+        tooltip=tooltip_fields
+    ).properties(
+        height=300 # 稍微降低高度，一屏能看更多
+    )
+
+    return chart
+
+# --- E. 主程序 ---
 
 def main_app():
     st.set_page_config(layout="wide", page_title="Hyperliquid OI Dashboard")
     
-    st.title("⚡ Hyperliquid OI 极速看板")
-    st.caption("高性能表格模式 | 包含迷你走势图 | 滚动无卡顿")
+    st.title("⚡ Hyperliquid OI 极速监控 (降采样优化版)")
     st.markdown("---") 
     
     # 1. 获取排名
-    with st.spinner("读取市场数据..."):
+    with st.spinner("正在加载排名..."):
         sorted_symbols = get_sorted_symbols_by_oi_usd()
-        if not sorted_symbols: st.stop()
-        
-        # 默认直接取前 100
-        target_symbols = sorted_symbols[:100]
-        
-        # 一次性获取数据
+    
+    if not sorted_symbols: st.stop()
+
+    # --- UI 控制 ---
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        # 默认 100 个
+        top_n = st.slider("显示合约数量", min_value=1, max_value=100, value=100, step=10)
+    
+    target_symbols = sorted_symbols[:top_n]
+
+    # 2. 批量获取数据
+    with st.spinner(f"正在获取数据..."):
         bulk_data = fetch_bulk_data_one_shot(target_symbols)
 
-    # 2. 转换为表格数据
-    if bulk_data:
-        df_display = prepare_dashboard_data(target_symbols, bulk_data)
+    if not bulk_data:
+        st.warning("暂无数据")
+        st.stop()
         
-        # 3. 渲染高性能表格
-        st.dataframe(
-            df_display,
-            column_config={
-                "合约": st.column_config.TextColumn("合约", help="点击表头排序", width="small"),
-                "价格 (USDC)": st.column_config.NumberColumn("价格", format="$%.4f"),
-                "24H 涨跌幅": st.column_config.NumberColumn(
-                    "涨跌幅", 
-                    format="%.2f%%", 
-                    help="基于当前获取数据区间的变化",
-                ),
-                "未平仓量 (OI)": st.column_config.NumberColumn(
-                    "持仓量 (OI)", 
-                    format="%.0f",
-                    help="未平仓合约数量"
-                ),
-                "价格走势 (7D)": st.column_config.LineChartColumn(
-                    "近期走势",
-                    width="medium",
-                    y_min=None, y_max=None # 自动缩放
-                ),
-                "链接": st.column_config.LinkColumn(
-                    "详情",
-                    display_text="Coinglass"
-                )
-            },
-            use_container_width=True,
-            hide_index=True,
-            height=800 # 固定高度，允许表格内部滚动
+    st.success(f"✅ 数据加载完成。当前开启【降采样模式】，只渲染关键点，滚动更流畅。")
+
+    # 3. 循环渲染
+    for rank, symbol in enumerate(target_symbols, 1):
+        raw_df = bulk_data.get(symbol)
+        
+        coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
+        color = "black"
+        
+        if raw_df is not None and not raw_df.empty:
+            # 计算涨跌色
+            start_p = raw_df['标记价格 (USDC)'].iloc[0]
+            end_p = raw_df['标记价格 (USDC)'].iloc[-1]
+            color = "#009900" if end_p >= start_p else "#D10000"
+            
+            # 【关键步骤】在这里进行降采样！
+            # 原始数据可能有4000条，我们只传150条给绘图引擎
+            chart_df = downsample_data(raw_df, target_points=150)
+            
+            # 画图
+            chart = create_dual_axis_chart(chart_df, symbol)
+        else:
+            chart = None
+
+        expander_title_html = (
+            f'<div style="text-align: center; margin-bottom: 5px;">'
+            f'<a href="{coinglass_url}" target="_blank" '
+            f'style="text-decoration:none; color:{color}; font-weight:bold; font-size:20px;">'
+            f'#{rank} {symbol} </a>'
+            f'</div>'
         )
-    else:
-        st.warning("暂无数据显示")
+        
+        # 保持展开
+        with st.expander(f"#{rank} {symbol}", expanded=True):
+            st.markdown(expander_title_html, unsafe_allow_html=True)
+            if chart:
+                st.altair_chart(chart, use_container_width=True)
+            else:
+                st.info("暂无数据")
 
 if __name__ == '__main__':
     main_app()
