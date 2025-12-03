@@ -85,25 +85,23 @@ def fetch_bulk_data_one_shot(symbol_list):
         st.error(f"⚠️ 数据查询失败: {e}")
         return {}
 
-# --- C. 降采样逻辑 (核心优化) ---
+# --- C. 降采样逻辑 (已调整为 400) ---
 
-def downsample_data(df, target_points=150):
+def downsample_data(df, target_points=400):
     """
     【核心优化函数】
-    将 4000 个点的数据压缩到 target_points (默认150个)，
-    极大减轻浏览器绘图压力。
+    将数据压缩到 target_points (400个)，保留更多细节的同时减少浏览器压力。
     """
     if len(df) <= target_points:
         return df
     
-    # 计算步长，例如 4000 / 150 ≈ 26，每 26 个点取 1 个
+    # 计算步长，例如 4000 / 400 = 10，每 10 个点取 1 个
     step = len(df) // target_points
     
-    # 简单的切片采样 (Slicing)
-    # 这比聚合计算(mean/max)要快得多，对于展示趋势完全足够
+    # 切片采样
     df_sampled = df.iloc[::step].copy()
     
-    # 确保最后一个点（最新数据）被包含进去，否则可能会漏掉最新价格
+    # 确保最后一个点（最新数据）被包含进去
     if df.index[-1] not in df_sampled.index:
         df_sampled = pd.concat([df_sampled, df.iloc[[-1]]])
         
@@ -129,7 +127,7 @@ def create_dual_axis_chart(df, symbol):
     df = df.reset_index(drop=True)
     df['index'] = df.index
 
-    # Tooltip 简化
+    # Tooltip
     tooltip_fields = [
         alt.Tooltip('time', title='时间', format="%m-%d %H:%M"),
         alt.Tooltip('标记价格 (USDC)', title='价格', format='$,.4f'),
@@ -159,7 +157,7 @@ def create_dual_axis_chart(df, symbol):
     chart = alt.layer(line_price, line_oi).resolve_scale(y='independent').encode(
         tooltip=tooltip_fields
     ).properties(
-        height=300 # 稍微降低高度，一屏能看更多
+        height=300 
     )
 
     return chart
@@ -169,7 +167,7 @@ def create_dual_axis_chart(df, symbol):
 def main_app():
     st.set_page_config(layout="wide", page_title="Hyperliquid OI Dashboard")
     
-    st.title("⚡ Hyperliquid OI 极速监控 (降采样优化版)")
+    st.title("⚡ Hyperliquid OI 极速监控 (高清流畅版)")
     st.markdown("---") 
     
     # 1. 获取排名
@@ -186,15 +184,15 @@ def main_app():
     
     target_symbols = sorted_symbols[:top_n]
 
-    # 2. 批量获取数据
+    # 2. 批量获取数据 (保留完整数据在内存，用于计算涨跌幅)
     with st.spinner(f"正在获取数据..."):
         bulk_data = fetch_bulk_data_one_shot(target_symbols)
 
     if not bulk_data:
-        st.warning("暂无数据")
+        st.warning("暂无数据，请检查网络或白名单设置")
         st.stop()
         
-    st.success(f"✅ 数据加载完成。当前开启【降采样模式】，只渲染关键点，滚动更流畅。")
+    st.success(f"✅ 数据加载完成。采样率：400点/图 (兼顾细节与性能)。")
 
     # 3. 循环渲染
     for rank, symbol in enumerate(target_symbols, 1):
@@ -202,21 +200,19 @@ def main_app():
         
         coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
         color = "black"
+        chart = None
         
         if raw_df is not None and not raw_df.empty:
-            # 计算涨跌色
+            # 计算涨跌色 (使用原始数据，保证准确)
             start_p = raw_df['标记价格 (USDC)'].iloc[0]
             end_p = raw_df['标记价格 (USDC)'].iloc[-1]
             color = "#009900" if end_p >= start_p else "#D10000"
             
-            # 【关键步骤】在这里进行降采样！
-            # 原始数据可能有4000条，我们只传150条给绘图引擎
-            chart_df = downsample_data(raw_df, target_points=150)
+            # 【关键修改】采样到 400 个点，细节更多
+            chart_df = downsample_data(raw_df, target_points=400)
             
             # 画图
             chart = create_dual_axis_chart(chart_df, symbol)
-        else:
-            chart = None
 
         expander_title_html = (
             f'<div style="text-align: center; margin-bottom: 5px;">'
@@ -226,7 +222,7 @@ def main_app():
             f'</div>'
         )
         
-        # 保持展开
+        # 保持默认展开
         with st.expander(f"#{rank} {symbol}", expanded=True):
             st.markdown(expander_title_html, unsafe_allow_html=True)
             if chart:
