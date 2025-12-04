@@ -6,19 +6,23 @@ import os
 from contextlib import contextmanager
 
 # --- A. 数据库配置 ---
+# ⚠️ 请确认密码正确
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None) 
 DB_CHARSET = 'utf8mb4'
-NEW_DB_NAME = 'open_interest_db'
-TABLE_NAME = 'hyperliquid' 
+
+# 两个数据库名
+DB_NAME_OI = 'open_interest_db'
+DB_NAME_SUPPLY = 'circulating_supply'
+
 DATA_LIMIT = 4000 
 
-# --- B. 数据库功能 (单次连接极速版) ---
+# --- B. 数据库功能 ---
 
 @st.cache_resource
-def get_db_connection_params():
+def get_db_connection_params(db_name):
     if not DB_PASSWORD:
         st.error("❌ 数据库密码未配置。")
         st.stop()
@@ -27,27 +31,43 @@ def get_db_connection_params():
         'port': DB_PORT,
         'user': DB_USER,
         'password': DB_PASSWORD,
-        'db': NEW_DB_NAME,
+        'db': db_name,
         'charset': DB_CHARSET,
         'autocommit': True,
         'connect_timeout': 10
     }
 
 @contextmanager
-def get_connection():
-    params = get_db_connection_params()
+def get_connection(db_name):
+    """通用连接管理器"""
+    params = get_db_connection_params(db_name)
     conn = pymysql.connect(**params)
     try:
         yield conn
     finally:
         conn.close()
 
+@st.cache_data(ttl=3600) # 流通量数据不常变，缓存 1 小时
+def fetch_circulating_supply():
+    """从 circulating_supply 数据库读取流通量数据"""
+    try:
+        with get_connection(DB_NAME_SUPPLY) as conn:
+            # 读取 symbol, circulating_supply, market_cap
+            sql = f"SELECT symbol, circulating_supply, market_cap FROM `{DB_NAME_SUPPLY}`"
+            df = pd.read_sql(sql, conn)
+            # 转为字典以便快速查找: {'BTC': {'supply': 19000000, 'mcap': ...}}
+            return df.set_index('symbol').to_dict('index')
+    except Exception as e:
+        # 如果读取失败（比如表还没建好），不报错，只打印警告并返回空
+        print(f"⚠️ 流通量数据读取失败: {e}")
+        return {}
+
 @st.cache_data(ttl=60)
 def get_sorted_symbols_by_oi_usd():
-    """获取排名列表"""
+    """获取 OI 排名"""
     try:
-        with get_connection() as conn:
-            sql = f"SELECT symbol FROM `{TABLE_NAME}` GROUP BY symbol ORDER BY MAX(oi_usd) DESC;"
+        with get_connection(DB_NAME_OI) as conn:
+            sql = f"SELECT symbol FROM `hyperliquid` GROUP BY symbol ORDER BY MAX(oi_usd) DESC;"
             df = pd.read_sql(sql, conn)
             return df['symbol'].tolist()
     except Exception as e:
@@ -56,7 +76,7 @@ def get_sorted_symbols_by_oi_usd():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_bulk_data_one_shot(symbol_list):
-    """单次查询所有数据 (One-Shot)"""
+    """批量获取行情数据"""
     if not symbol_list: return {}
     placeholders = ', '.join(['%s'] * len(symbol_list))
     
@@ -64,7 +84,7 @@ def fetch_bulk_data_one_shot(symbol_list):
     WITH RankedData AS (
         SELECT symbol, `time`, `price`, `oi`,
         ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY `time` DESC) as rn
-        FROM `{TABLE_NAME}`
+        FROM `hyperliquid`
         WHERE symbol IN ({placeholders})
     )
     SELECT symbol, `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
@@ -74,7 +94,7 @@ def fetch_bulk_data_one_shot(symbol_list):
     """
     
     try:
-        with get_connection() as conn:
+        with get_connection(DB_NAME_OI) as conn:
             df_all = pd.read_sql(sql_query, conn, params=tuple(symbol_list) + (DATA_LIMIT,))
         
         if df_all.empty: return {}
@@ -83,21 +103,21 @@ def fetch_bulk_data_one_shot(symbol_list):
         st.error(f"⚠️ 数据查询失败: {e}")
         return {}
 
-# --- C. 降采样逻辑 (400点) ---
+# --- C. 辅助与绘图 ---
+
+def format_number(num):
+    if abs(num) >= 1_000_000_000: return f"{num / 1_000_000_000:.2f}B"
+    elif abs(num) >= 1_000_000: return f"{num / 1_000_000:.2f}M"
+    elif abs(num) >= 1_000: return f"{num / 1_000:.1f}K"
+    else: return f"{num:.0f}"
 
 def downsample_data(df, target_points=400):
-    if len(df) <= target_points:
-        return df
-    
+    if len(df) <= target_points: return df
     step = len(df) // target_points
     df_sampled = df.iloc[::step].copy()
-    
     if df.index[-1] not in df_sampled.index:
         df_sampled = pd.concat([df_sampled, df.iloc[[-1]]])
-        
     return df_sampled
-
-# --- D. 绘图函数 (高度 450px) ---
 
 axis_format_logic = """
 datum.value >= 1000000000 ? format(datum.value / 1000000000, ',.2f') + 'B' : 
@@ -108,7 +128,6 @@ format(datum.value, ',.0f')
 
 def create_dual_axis_chart(df, symbol):
     if df.empty: return None
-    
     if not pd.api.types.is_datetime64_any_dtype(df['time']):
         df['time'] = pd.to_datetime(df['time'])
     
@@ -121,9 +140,7 @@ def create_dual_axis_chart(df, symbol):
         alt.Tooltip('未平仓量', title='OI', format=',.0f') 
     ]
     
-    base = alt.Chart(df).encode(
-        alt.X('index', title=None, axis=alt.Axis(labels=False))
-    )
+    base = alt.Chart(df).encode(alt.X('index', title=None, axis=alt.Axis(labels=False)))
     
     line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
         alt.Y('标记价格 (USDC)', axis=alt.Axis(title='', titleColor='#d62728', orient='right'), scale=alt.Scale(zero=False))
@@ -139,104 +156,146 @@ def create_dual_axis_chart(df, symbol):
 
     return chart
 
-# --- E. 主程序 ---
+# --- D. 主程序 ---
 
 def main_app():
     st.set_page_config(layout="wide", page_title="Hyperliquid OI Dashboard")
+    st.title("⚡ OI 强度监控 (OI Growth vs Supply)")
     
-    st.title("⚡ Hyperliquid OI 极速监控")
-    
-    # 1. 获取排名
-    with st.spinner("正在加载排名..."):
+    # 1. 准备数据
+    with st.spinner("正在读取流通量数据库..."):
+        supply_data = fetch_circulating_supply()
+        
+    with st.spinner("正在加载市场数据..."):
         sorted_symbols = get_sorted_symbols_by_oi_usd()
-    
-    if not sorted_symbols: st.stop()
-
-    # Top 100 设置
-    top_n = 100
-    target_symbols = sorted_symbols[:top_n]
-
-    # 2. 批量获取数据
-    with st.spinner(f"正在获取 Top {top_n} 数据..."):
+        if not sorted_symbols: st.stop()
+        
+        # 默认前 100
+        target_symbols = sorted_symbols[:100]
         bulk_data = fetch_bulk_data_one_shot(target_symbols)
 
     if not bulk_data:
-        st.warning("暂无数据，请检查网络或白名单设置")
+        st.warning("暂无数据")
         st.stop()
 
-    # --- 【新增功能 1】全局概览：OI 飙升榜 (Top 5 Movers) ---
-    st.markdown("### 🔥 OI 24H 飙升榜 (Top 5)")
+    # --- 【核心算法】计算 OI 强度 ---
+    # 强度指标 = (OI增加的Token数量) / (流通量)
+    # 或者等价于 = (OI增加的USD价值) / (流通市值)
     
-    # 计算所有已加载币种的 OI 变化率
-    oi_metrics = []
+    ranking_data = []
+    
     for sym, df in bulk_data.items():
         if df.empty or len(df) < 2: continue
-        start_oi = df['未平仓量'].iloc[0]
+        
+        # 获取该币种的流通数据
+        token_info = supply_data.get(sym)
+        
+        # 计算 OI 变化
+        start_oi = df['未平仓量'].iloc[0] # 单位通常是 Token 数量
         end_oi = df['未平仓量'].iloc[-1]
+        price = df['标记价格 (USDC)'].iloc[-1]
         
-        if start_oi == 0: continue
+        oi_change_tokens = end_oi - start_oi
+        oi_change_usd = oi_change_tokens * price
         
-        oi_change = (end_oi - start_oi) / start_oi
-        oi_metrics.append({"symbol": sym, "change": oi_change})
-    
-    # 排序并取前 5
-    if oi_metrics:
-        top_movers = sorted(oi_metrics, key=lambda x: x['change'], reverse=True)[:5]
+        # 计算强度 (Intensity)
+        intensity = 0
+        mc = 0
+        
+        if token_info and token_info.get('market_cap') and token_info['market_cap'] > 0:
+            # 如果有市值数据，直接用 (OI变动金额 / 市值)
+            mc = token_info['market_cap']
+            intensity = oi_change_usd / mc
+        elif token_info and token_info.get('circulating_supply') and token_info['circulating_supply'] > 0:
+            # 如果只有流通量，用 (OI变动数量 / 流通量)
+            supply = token_info['circulating_supply']
+            intensity = oi_change_tokens / supply
+        else:
+            # 如果都没有，暂时给个低权重，或者只看 OI 变动比例作为保底
+            if start_oi > 0:
+                intensity = (oi_change_tokens / start_oi) * 0.1 # 降权处理
+        
+        ranking_data.append({
+            "symbol": sym,
+            "intensity": intensity, # 这是一个比例，比如 0.05 代表 OI 增加了流通盘的 5%
+            "oi_change_usd": oi_change_usd,
+            "market_cap": mc
+        })
+
+    # --- 【顶部展示】 Top 5 强度榜单 ---
+    st.markdown("### 🔥 OI 强度榜 (OI 增量 / 流通市值)")
+    st.caption("该榜单显示 **OI 净增长占流通盘的比例**。比例越高，说明主力资金相对于该币种体量介入得越深。")
+
+    if ranking_data:
+        # 按强度绝对值排序 (关注暴涨和暴跌) -> 这里我们先只看正向流入 (暴涨潜力)
+        # 如果想看双向，可以用 key=lambda x: abs(x['intensity'])
+        top_movers = sorted(ranking_data, key=lambda x: x['intensity'], reverse=True)[:5]
         
         cols = st.columns(5)
-        for i, mover in enumerate(top_movers):
-            # 使用 Metric 组件展示
+        for i, item in enumerate(top_movers):
+            sym = item['symbol']
+            intensity_pct = item['intensity'] * 100
+            
+            # 显示格式
+            icon = "🔥" if intensity_pct > 2 else "📈"
+            mc_str = format_number(item['market_cap']) if item['market_cap'] > 0 else "N/A"
+            
             cols[i].metric(
-                label=f"Top {i+1} {mover['symbol']}",
-                value=f"{mover['change']:.2%}",
-                delta="OI 激增",
-                delta_color="normal" # 默认为绿色
+                label=f"No.{i+1} {sym} {icon}",
+                value=f"{intensity_pct:.2f}%", # 显示 5.20% (即 OI 占了流通盘的 5.2%)
+                delta=f"MC: ${mc_str}", # 显示市值作为参考
+                delta_color="off" # 灰色显示市值
             )
+            
+        # 顺便把这 Top 5 的图表直接画出来？用户说"图标一并列出"
+        # 我们可以在下面直接展示这 5 个图表，或者只在下面大列表中高亮
     
-    st.markdown("---") 
+    st.markdown("---")
 
-    # 3. 循环渲染列表
+    # --- 大列表渲染 ---
+    # 按照 OI 美元总量排序 (默认逻辑)
     for rank, symbol in enumerate(target_symbols, 1):
         raw_df = bulk_data.get(symbol)
         
         coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
         title_color = "black"
         chart = None
-        oi_info_html = "" # 用于存放 OI 信息的 HTML
+        info_html = ""
         
         if raw_df is not None and not raw_df.empty:
-            # A. 计算价格涨跌色
             start_p = raw_df['标记价格 (USDC)'].iloc[0]
             end_p = raw_df['标记价格 (USDC)'].iloc[-1]
             title_color = "#009900" if end_p >= start_p else "#D10000"
             
-            # B. 【新增功能 2】计算 OI 变化率并生成标题信息
-            start_oi = raw_df['未平仓量'].iloc[0]
-            end_oi = raw_df['未平仓量'].iloc[-1]
+            # 获取强度信息
+            item_stats = next((item for item in ranking_data if item["symbol"] == symbol), None)
             
-            if start_oi > 0:
-                oi_pct = (end_oi - start_oi) / start_oi * 100
-                oi_color = "#009900" if oi_pct >= 0 else "#D10000"
-                # 添加 emoji 增强视觉
-                oi_icon = "🔥" if oi_pct > 5 else ("❄️" if oi_pct < -5 else "")
+            if item_stats:
+                # 强度显示
+                int_val = item_stats['intensity'] * 100
+                int_color = "#d62728" if int_val > 5 else ("#009900" if int_val > 1 else "#555")
+                # OI 增量显示
+                inflow = item_stats['oi_change_usd']
+                inflow_str = format_number(inflow)
+                prefix = "+" if inflow > 0 else ""
                 
-                oi_info_html = (
-                    f'<span style="font-size: 16px; color: #555; margin-left: 15px;">'
-                    f'OI 变化: <span style="color: {oi_color}; font-weight: bold;">{oi_pct:+.2f}%</span> {oi_icon}'
+                info_html = (
+                    f'<span style="font-size: 16px; margin-left: 15px; color: #666;">'
+                    f'强度: <span style="color: {int_color}; font-weight: bold;">{int_val:.2f}%</span>'
+                    f'<span style="margin: 0 8px;">|</span>'
+                    f'净流入: <span style="color: {"green" if inflow>0 else "red"};">{prefix}${inflow_str}</span>'
                     f'</span>'
                 )
 
-            # C. 采样并绘图
             chart_df = downsample_data(raw_df, target_points=400)
             chart = create_dual_axis_chart(chart_df, symbol)
 
-        # 组合标题 HTML
         expander_title_html = (
             f'<div style="text-align: center; margin-bottom: 5px;">'
             f'<a href="{coinglass_url}" target="_blank" '
             f'style="text-decoration:none; color:{title_color}; font-weight:bold; font-size:22px;">'
             f'#{rank} {symbol} </a>'
-            f'{oi_info_html}'  # 把 OI 信息插在这里
+            f'{info_html}'
             f'</div>'
         )
         
@@ -249,3 +308,4 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
