@@ -30,7 +30,7 @@ DB_NAME_OI = 'open_interest_db'
 
 DB_NAME_SUPPLY = 'circulating_supply'
 
-DATA_LIMIT = 4000 
+DATA_LIMIT = 800 
 
 
 
@@ -667,3 +667,4 @@ def main_app():
 if __name__ == '__main__':
 
     main_app()
+
