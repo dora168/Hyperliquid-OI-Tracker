@@ -6,7 +6,6 @@ import os
 from contextlib import contextmanager
 
 # --- A. 数据库配置 ---
-# ⚠️ 请确认密码正确
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
@@ -46,7 +45,6 @@ def get_connection(db_name):
 
 @st.cache_data(ttl=3600)
 def fetch_circulating_supply():
-    """读取流通量数据"""
     try:
         with get_connection(DB_NAME_SUPPLY) as conn:
             sql = f"SELECT symbol, circulating_supply, market_cap FROM `{DB_NAME_SUPPLY}`"
@@ -58,7 +56,6 @@ def fetch_circulating_supply():
 
 @st.cache_data(ttl=60)
 def get_sorted_symbols_by_oi_usd():
-    """获取 OI 排名"""
     try:
         with get_connection(DB_NAME_OI) as conn:
             sql = f"SELECT symbol FROM `hyperliquid` GROUP BY symbol ORDER BY MAX(oi_usd) DESC;"
@@ -70,7 +67,6 @@ def get_sorted_symbols_by_oi_usd():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_bulk_data_one_shot(symbol_list):
-    """批量获取行情数据"""
     if not symbol_list: return {}
     placeholders = ', '.join(['%s'] * len(symbol_list))
     
@@ -150,9 +146,7 @@ def create_dual_axis_chart(df, symbol):
 
     return chart
 
-# --- 【新增】图表渲染组件 (用于复用) ---
 def render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=False):
-    """封装了单个图表和标题栏的渲染逻辑"""
     raw_df = bulk_data.get(symbol)
     coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
     title_color = "black"
@@ -164,42 +158,39 @@ def render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=F
         end_p = raw_df['标记价格 (USDC)'].iloc[-1]
         title_color = "#009900" if end_p >= start_p else "#D10000"
         
-        # 获取强度信息
+        # 获取统计信息
         item_stats = next((item for item in ranking_data if item["symbol"] == symbol), None)
         if item_stats:
             int_val = item_stats['intensity'] * 100
             int_color = "#d62728" if int_val > 5 else ("#009900" if int_val > 1 else "#555")
-            inflow = item_stats['oi_change_usd']
-            inflow_str = format_number(inflow)
-            prefix = "+" if inflow > 0 else ""
+            
+            # 使用 "较底部增长" 的资金量
+            growth_usd = item_stats['oi_growth_usd']
+            growth_str = format_number(growth_usd)
             
             info_html = (
                 f'<span style="font-size: 16px; margin-left: 15px; color: #666;">'
                 f'强度: <span style="color: {int_color}; font-weight: bold;">{int_val:.2f}%</span>'
                 f'<span style="margin: 0 8px;">|</span>'
-                f'净流入: <span style="color: {"green" if inflow>0 else "red"};">{prefix}${inflow_str}</span>'
+                f'底部增量: <span style="color: #009900; font-weight: bold;">+${growth_str}</span>'
                 f'</span>'
             )
 
         chart_df = downsample_data(raw_df, target_points=400)
         chart = create_dual_axis_chart(chart_df, symbol)
 
-    # Top Mover 特殊标识
     fire_icon = "🔥" if is_top_mover else ""
-
     expander_title_html = (
         f'<div style="text-align: center; margin-bottom: 5px;">'
         f'{fire_icon} '
         f'<a href="{coinglass_url}" target="_blank" '
         f'style="text-decoration:none; color:{title_color}; font-weight:bold; font-size:22px;">'
-        f' {symbol} </a>' # 移除排名，Top区域不需要
+        f' {symbol} </a>'
         f'{info_html}'
         f'</div>'
     )
     
-    # Top Mover 默认使用红色边框强调 (Streamlit 原生不支持改边框色，用 emoji 代替)
     label = f"🔥 {symbol} (强度 Top {rank})" if is_top_mover else f"#{rank} {symbol}"
-
     with st.expander(label, expanded=True):
         st.markdown(expander_title_html, unsafe_allow_html=True)
         if chart:
@@ -207,14 +198,12 @@ def render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=F
         else:
             st.info("暂无数据")
 
-
 # --- D. 主程序 ---
 
 def main_app():
     st.set_page_config(layout="wide", page_title="Hyperliquid OI Dashboard")
-    st.title("⚡ OI 强度监控 (OI Growth vs Supply)")
+    st.title("⚡ OI 强度监控 (底部反弹特化版)")
     
-    # 1. 准备数据
     with st.spinner("正在读取流通量数据库..."):
         supply_data = fetch_circulating_supply()
         
@@ -228,70 +217,87 @@ def main_app():
     if not bulk_data:
         st.warning("暂无数据"); st.stop()
 
-    # --- 计算强度 ---
+    # --- 【核心算法 V2】计算 OI 较底部增长强度 ---
     ranking_data = []
+    
     for sym, df in bulk_data.items():
         if df.empty or len(df) < 2: continue
+        
         token_info = supply_data.get(sym)
+        current_price = df['标记价格 (USDC)'].iloc[-1]
         
-        start_oi = df['未平仓量'].iloc[0]
-        end_oi = df['未平仓量'].iloc[-1]
-        price = df['标记价格 (USDC)'].iloc[-1]
-        oi_change_tokens = end_oi - start_oi
-        oi_change_usd = oi_change_tokens * price
+        # 1. 找到区间内的最低 OI (Baseline)
+        current_oi = df['未平仓量'].iloc[-1]
+        min_oi = df['未平仓量'].min()
         
+        # 2. 计算较底部的增长量 (Growth from Low)
+        # 即使现在跌了，如果比最低点高，也算正向流入
+        oi_growth_tokens = current_oi - min_oi
+        oi_growth_usd = oi_growth_tokens * current_price
+        
+        # 3. 计算强度 (Growth USD / Market Cap)
         intensity = 0
-        mc = 0
+        market_cap = 0
+        
         if token_info and token_info.get('market_cap') and token_info['market_cap'] > 0:
-            mc = token_info['market_cap']
-            intensity = oi_change_usd / mc
+            market_cap = token_info['market_cap']
+            intensity = oi_growth_usd / market_cap
         elif token_info and token_info.get('circulating_supply') and token_info['circulating_supply'] > 0:
+            # 降级：用 (增量 / 流通量)
             supply = token_info['circulating_supply']
-            intensity = oi_change_tokens / supply
+            intensity = oi_growth_tokens / supply
         else:
-             if start_oi > 0: intensity = (oi_change_tokens / start_oi) * 0.1
+            # 再次降级：用 (增量 / 最小OI) * 权重
+            if min_oi > 0:
+                intensity = (oi_growth_tokens / min_oi) * 0.1
 
-        ranking_data.append({"symbol": sym, "intensity": intensity, "oi_change_usd": oi_change_usd, "market_cap": mc})
+        ranking_data.append({
+            "symbol": sym,
+            "intensity": intensity, 
+            "oi_growth_usd": oi_growth_usd,
+            "market_cap": market_cap
+        })
 
-    # --- 【顶部展示】 Top 5 强度榜单 (指标卡片) ---
-    st.markdown("### 🔥 Top 5 强度榜 (OI增量占市值比)")
-    st.caption("反映主力资金相对于代币体量的介入程度。")
+    # --- Top 5 榜单 ---
+    st.markdown("### 🔥 Top 5 强度榜 (较底部增长 / 流通市值)")
+    st.caption("筛选逻辑：**(当前OI - 区间最低OI) / 市值**。该指标用于捕捉主力资金**抄底**或**主升浪**的最强信号。")
 
     top_movers = []
     if ranking_data:
+        # 只看强度最大的 (正向增长)
         top_movers = sorted(ranking_data, key=lambda x: x['intensity'], reverse=True)[:5]
+        
         cols = st.columns(5)
         for i, item in enumerate(top_movers):
             sym = item['symbol']
             intensity_pct = item['intensity'] * 100
             mc_str = format_number(item['market_cap']) if item['market_cap'] > 0 else "N/A"
+            
             cols[i].metric(
                 label=f"No.{i+1} {sym}",
-                value=f"{intensity_pct:.2f}%",
-                delta=f"MC: ${mc_str}", delta_color="off"
+                value=f"{intensity_pct:.2f}%", # 显示强度
+                delta=f"MC: ${mc_str}",
+                delta_color="off"
             )
     
     st.markdown("---")
     
-    # --- 【新增】直接展示 Top 5 的图表 ---
-    st.subheader("📈 Top 5 强度币种走势速览")
+    # --- Top 5 图表 ---
+    st.subheader("📈 Top 5 强势币种速览")
     if top_movers:
         for i, item in enumerate(top_movers, 1):
-            # 调用复用组件
             render_chart_component(i, item['symbol'], bulk_data, ranking_data, is_top_mover=True)
     else:
-        st.info("暂无强度数据")
+        st.info("暂无数据")
 
     st.markdown("---")
     st.subheader("📋 全部合约列表")
 
-    # --- 大列表渲染 (剔除 Top 5) ---
-    top_mover_symbols = [item['symbol'] for item in top_movers]
-    # 过滤掉已经在上面展示过的 symbol
-    remaining_symbols = [s for s in target_symbols if s not in top_mover_symbols]
+    # --- 剩余列表 ---
+    top_symbols = [item['symbol'] for item in top_movers]
+    remaining_symbols = [s for s in target_symbols if s not in top_symbols]
 
     for rank, symbol in enumerate(remaining_symbols, len(top_movers) + 1):
-        # 调用复用组件
         render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=False)
 
 if __name__ == '__main__':
