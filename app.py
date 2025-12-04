@@ -5,7 +5,7 @@ import pymysql
 import os
 from contextlib import contextmanager
 
-# --- A. 数据库配置 ---
+# --- A. 数据库配置 ----
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
@@ -333,4 +333,5 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
