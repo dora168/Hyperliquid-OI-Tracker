@@ -522,62 +522,35 @@ def main_app():
 
 
 
-    # --- 左侧指标：Top 10 强度 ---
-
+    # --- 左侧指标：Top 10 强度 (已替换为截图样式+迷你图) ---
     with col_left:
-
-        st.subheader("🔥 Top 10 强度榜 (相对比例)")
-
+        st.subheader("🔥 Top 10 强度榜 (Intensity)")
         st.caption("逻辑：(当前OI - 最低OI) / 市值。")
-
         st.markdown("---")
+        
+        if top_intensity:
+            for i, item in enumerate(top_intensity, 1):
+                # 使用 render_chart_component 替代 st.metric
+                # 这将渲染：排名、大号百分比、灰色胶囊MC、以及高度为60px的迷你图
+                render_chart_component(i, item['symbol'], bulk_data, ranking_data, list_type="strength")
+        else:
+            st.info("暂无数据")
 
-        for i, item in enumerate(top_intensity):
-
-            st.metric(
-
-                label=f"No.{i+1} {item['symbol']}",
-
-                value=f"{item['intensity']*100:.2f}%",
-
-                delta=f"MC: ${format_number(item['market_cap'])}",
-
-                delta_color="off"
-
-            )
-
-            st.markdown("""<hr style="margin: 5px 0; border-top: 1px dashed #eee;">""", unsafe_allow_html=True)
-
-    
-
-    # --- 右侧指标：Top 10 巨鲸 ---
-
+    # --- 右侧指标：Top 10 巨鲸 (已替换为截图样式+迷你图) ---
     with col_right:
-
-        st.subheader("🐳 Top 10 巨鲸榜 (绝对金额)")
-
+        st.subheader("🐳 Top 10 巨鲸榜 (Net Inflow)")
         st.caption("逻辑：(当前OI - 最低OI) * 价格。")
-
         st.markdown("---")
-
-        for i, item in enumerate(top_whales):
-
-            st.metric(
-
-                label=f"No.{i+1} {item['symbol']}",
-
-                value=f"+${format_number(item['oi_growth_usd'])}",
-
-                delta="资金净流入",
-
-                delta_color="normal"
-
-            )
-
-            st.markdown("""<hr style="margin: 5px 0; border-top: 1px dashed #eee;">""", unsafe_allow_html=True)
-
+        
+        if top_whales:
+            for i, item in enumerate(top_whales, 1):
+                # 使用 render_chart_component 替代 st.metric
+                # 这将渲染：排名、大号金额、灰色胶囊Tag、以及高度为60px的迷你图
+                render_chart_component(i, item['symbol'], bulk_data, ranking_data, list_type="whale")
+        else:
+            st.info("暂无数据")
     
-
+    # 分割线
     st.markdown("---")
 
     
@@ -667,4 +640,5 @@ def main_app():
 if __name__ == '__main__':
 
     main_app()
+
 
