@@ -136,10 +136,14 @@ def create_dual_axis_chart(df, symbol):
     )
     chart = alt.layer(line_price, line_oi).resolve_scale(y='independent').encode(
         tooltip=tooltip_fields
-    ).properties(height=450)
+    ).properties(height=450) # 保持高清高度
     return chart
 
-def render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=False):
+def render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=False, list_type=""):
+    """
+    渲染单个图表组件
+    list_type: 用于区分 'strength' 或 'whale'，方便生成唯一的 key
+    """
     raw_df = bulk_data.get(symbol)
     coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
     title_color = "black"
@@ -160,33 +164,34 @@ def render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=F
             growth_str = format_number(growth_usd)
             
             info_html = (
-                f'<span style="font-size: 16px; margin-left: 15px; color: #666;">'
-                f'强度: <span style="color: {int_color}; font-weight: bold;">{int_val:.2f}%</span>'
-                f'<span style="margin: 0 8px;">|</span>'
-                f'底部增量: <span style="color: #009900; font-weight: bold;">+${growth_str}</span>'
+                f'<span style="font-size: 14px; margin-left: 10px; color: #666;">' # 字体稍微调小适应分栏
+                f'强度:<span style="color: {int_color}; font-weight: bold;">{int_val:.1f}%</span>'
+                f'<span style="margin: 0 4px;">|</span>'
+                f'增量:<span style="color: #009900; font-weight: bold;">+${growth_str}</span>'
                 f'</span>'
             )
 
         chart_df = downsample_data(raw_df, target_points=400)
         chart = create_dual_axis_chart(chart_df, symbol)
 
-    fire_icon = "🔥" if is_top_mover else ""
+    # 标题生成
+    fire_icon = "🔥" if list_type == "strength" else ("🐳" if list_type == "whale" else "")
     expander_title_html = (
         f'<div style="text-align: center; margin-bottom: 5px;">'
         f'{fire_icon} '
         f'<a href="{coinglass_url}" target="_blank" '
-        f'style="text-decoration:none; color:{title_color}; font-weight:bold; font-size:22px;">'
+        f'style="text-decoration:none; color:{title_color}; font-weight:bold; font-size:20px;">' # 字体稍微调小
         f' {symbol} </a>'
         f'{info_html}'
         f'</div>'
     )
     
-    # 根据是否是 Top 榜单调整标签
     if is_top_mover:
-        label = f"🔥 {symbol}"
+        label = f"{fire_icon} {symbol}"
     else:
         label = f"#{rank} {symbol}"
 
+    # 这里的 expanded=True 配合 use_container_width=True 会自动适应左右分栏的宽度（变窄）
     with st.expander(label, expanded=True):
         st.markdown(expander_title_html, unsafe_allow_html=True)
         if chart:
@@ -198,7 +203,7 @@ def render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=F
 
 def main_app():
     st.set_page_config(layout="wide", page_title="Hyperliquid OI Dashboard")
-    st.title("⚡ OI 强度 & 资金流向监控")
+    st.title("⚡ OI 双塔监控 (强度 vs 巨鲸)")
     
     with st.spinner("正在读取流通量数据库..."):
         supply_data = fetch_circulating_supply()
@@ -220,13 +225,11 @@ def main_app():
         token_info = supply_data.get(sym)
         current_price = df['标记价格 (USDC)'].iloc[-1]
         
-        # 计算较底部的增量
         min_oi = df['未平仓量'].min()
         current_oi = df['未平仓量'].iloc[-1]
         oi_growth_tokens = current_oi - min_oi
         oi_growth_usd = oi_growth_tokens * current_price
         
-        # 计算强度
         intensity = 0
         market_cap = 0
         if token_info and token_info.get('market_cap') and token_info['market_cap'] > 0:
@@ -246,76 +249,88 @@ def main_app():
         })
 
     # ==========================
-    # 榜单 1: Top 5 强度 (小盘黑马)
+    # 榜单指标区 (Metric Lists)
     # ==========================
-    st.markdown("### 🔥 Top 5 强度榜 (Relative Strength)")
-    st.caption("逻辑：**(当前OI - 最低OI) / 流通市值**。寻找市值小但资金介入极深的币种。")
+    col_left, col_right = st.columns(2)
     
+    # 准备数据
     top_intensity = []
+    top_whales = []
     if ranking_data:
-        top_intensity = sorted(ranking_data, key=lambda x: x['intensity'], reverse=True)[:5]
-        cols = st.columns(5)
+        top_intensity = sorted(ranking_data, key=lambda x: x['intensity'], reverse=True)[:10]
+        top_whales = sorted(ranking_data, key=lambda x: x['oi_growth_usd'], reverse=True)[:10]
+
+    # --- 左侧指标：Top 10 强度 ---
+    with col_left:
+        st.subheader("🔥 Top 10 强度榜 (相对比例)")
+        st.caption("逻辑：(当前OI - 最低OI) / 市值。")
+        st.markdown("---")
         for i, item in enumerate(top_intensity):
-            cols[i].metric(
+            st.metric(
                 label=f"No.{i+1} {item['symbol']}",
                 value=f"{item['intensity']*100:.2f}%",
                 delta=f"MC: ${format_number(item['market_cap'])}",
                 delta_color="off"
             )
+            st.markdown("""<hr style="margin: 5px 0; border-top: 1px dashed #eee;">""", unsafe_allow_html=True)
+    
+    # --- 右侧指标：Top 10 巨鲸 ---
+    with col_right:
+        st.subheader("🐳 Top 10 巨鲸榜 (绝对金额)")
+        st.caption("逻辑：(当前OI - 最低OI) * 价格。")
+        st.markdown("---")
+        for i, item in enumerate(top_whales):
+            st.metric(
+                label=f"No.{i+1} {item['symbol']}",
+                value=f"+${format_number(item['oi_growth_usd'])}",
+                delta="资金净流入",
+                delta_color="normal"
+            )
+            st.markdown("""<hr style="margin: 5px 0; border-top: 1px dashed #eee;">""", unsafe_allow_html=True)
+    
     st.markdown("---")
-
+    
     # ==========================
-    # 榜单 2: Top 10 巨鲸资金 (大盘主力) - [新增功能]
+    # 双塔图表区 (Charts) - 左右并列
     # ==========================
-    st.markdown("### 🐳 Top 10 巨鲸榜 (Absolute USD Inflow)")
-    st.caption("逻辑：**(当前OI - 最低OI) * 当前价格**。寻找真金白银净流入金额最大的币种（大市值币种通常在此）。")
     
-    top_whales = []
-    if ranking_data:
-        # 按 oi_growth_usd 绝对值倒序排列
-        top_whales = sorted(ranking_data, key=lambda x: x['oi_growth_usd'], reverse=True)[:10]
-        
-        # 分两行显示 (每行5个)
-        row1 = st.columns(5)
-        for i in range(5):
-            if i < len(top_whales):
-                item = top_whales[i]
-                row1[i].metric(
-                    label=f"No.{i+1} {item['symbol']}",
-                    value=f"+${format_number(item['oi_growth_usd'])}",
-                    delta="资金净流入",
-                    delta_color="normal"
-                )
-        
-        row2 = st.columns(5)
-        for i in range(5, 10):
-            if i < len(top_whales):
-                item = top_whales[i]
-                row2[i-5].metric(
-                    label=f"No.{i+1} {item['symbol']}",
-                    value=f"+${format_number(item['oi_growth_usd'])}",
-                    delta="资金净流入",
-                    delta_color="normal"
-                )
+    chart_col_left, chart_col_right = st.columns(2)
+    
+    # --- 左塔：Top 10 强度图表 ---
+    with chart_col_left:
+        st.subheader("📈 强度 Top 10 走势")
+        if top_intensity:
+            for i, item in enumerate(top_intensity, 1):
+                # 放在半宽的 column 里，Streamlit 会自动缩小图表宽度
+                render_chart_component(i, item['symbol'], bulk_data, ranking_data, is_top_mover=True, list_type="strength")
+        else:
+            st.info("暂无数据")
+
+    # --- 右塔：Top 10 巨鲸图表 ---
+    with chart_col_right:
+        st.subheader("📈 巨鲸 Top 10 走势")
+        if top_whales:
+            for i, item in enumerate(top_whales, 1):
+                render_chart_component(i, item['symbol'], bulk_data, ranking_data, is_top_mover=True, list_type="whale")
+        else:
+            st.info("暂无数据")
     
     st.markdown("---")
-    
-    # --- Top 5 强度币种的图表展示 ---
-    st.subheader("📈 Top 5 强度币种走势速览")
-    if top_intensity:
-        for i, item in enumerate(top_intensity, 1):
-            render_chart_component(i, item['symbol'], bulk_data, ranking_data, is_top_mover=True)
-    
-    st.markdown("---")
-    st.subheader("📋 全部合约列表")
+    st.subheader("📋 其他合约列表 (已去重)")
 
-    # --- 剩余列表渲染 ---
-    # 去重：把在 Top 5 强度榜里出现过的币种剔除，避免重复
-    top_intensity_symbols = [item['symbol'] for item in top_intensity]
-    remaining_symbols = [s for s in target_symbols if s not in top_intensity_symbols]
+    # --- 底部：剩余列表 (去重) ---
+    # 收集已经在上面两个榜单里展示过的 symbol
+    shown_symbols = set()
+    for item in top_intensity: shown_symbols.add(item['symbol'])
+    for item in top_whales: shown_symbols.add(item['symbol'])
+    
+    # 过滤
+    remaining_symbols = [s for s in target_symbols if s not in shown_symbols]
 
-    for rank, symbol in enumerate(remaining_symbols, len(top_intensity) + 1):
+    # 全宽展示剩余的
+    for rank, symbol in enumerate(remaining_symbols, 1):
         render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=False)
 
 if __name__ == '__main__':
     main_app()
+
