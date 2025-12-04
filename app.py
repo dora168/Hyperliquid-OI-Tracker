@@ -6,22 +6,22 @@ import os
 from contextlib import contextmanager
 
 # --- A. 数据库配置 ----
-# 请确保您已在 Streamlit Secrets 或环境变量中配置了这些信息
-DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST")
-DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 3306))
-DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
+DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
+DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None) 
 DB_CHARSET = 'utf8mb4'
 
 DB_NAME_OI = 'open_interest_db'
 DB_NAME_SUPPLY = 'circulating_supply'
+DATA_LIMIT = 4000 
 
 # --- B. 数据库功能 ---
 
 @st.cache_resource
 def get_db_connection_params(db_name):
-    if not DB_PASSWORD or not DB_HOST or not DB_USER:
-        st.error("❌ 数据库连接信息未配置，请检查 Secrets 或环境变量。")
+    if not DB_PASSWORD:
+        st.error("❌ 数据库密码未配置。")
         st.stop()
     return {
         'host': DB_HOST,
@@ -37,16 +37,13 @@ def get_db_connection_params(db_name):
 @contextmanager
 def get_connection(db_name):
     params = get_db_connection_params(db_name)
+    conn = pymysql.connect(**params)
     try:
-        conn = pymysql.connect(**params)
         yield conn
-    except pymysql.MySQLError as e:
-        st.error(f"❌ 数据库连接失败: {e}")
     finally:
-        if 'conn' in locals() and conn.open:
-            conn.close()
+        conn.close()
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1)
 def fetch_circulating_supply():
     try:
         with get_connection(DB_NAME_SUPPLY) as conn:
@@ -69,253 +66,213 @@ def get_sorted_symbols_by_oi_usd():
         return []
 
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_bulk_data_one_shot(symbol_list, interval_sql="24 HOUR"):
+def fetch_bulk_data_one_shot(symbol_list):
     if not symbol_list: return {}
-    
     placeholders = ', '.join(['%s'] * len(symbol_list))
     
     sql_query = f"""
+    WITH RankedData AS (
+        SELECT symbol, `time`, `price`, `oi`,
+        ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY `time` DESC) as rn
+        FROM `hyperliquid`
+        WHERE symbol IN ({placeholders})
+    )
     SELECT symbol, `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
-    FROM `hyperliquid`
-    WHERE symbol IN ({placeholders})
-      AND `time` >= NOW() - INTERVAL {interval_sql}
+    FROM RankedData
+    WHERE rn <= %s
     ORDER BY symbol, `time` ASC;
     """
     
     try:
         with get_connection(DB_NAME_OI) as conn:
-            df_all = pd.read_sql(sql_query, conn, params=tuple(symbol_list))
+            df_all = pd.read_sql(sql_query, conn, params=tuple(symbol_list) + (DATA_LIMIT,))
         
         if df_all.empty: return {}
-
-        result = {}
-        grouped = df_all.groupby('symbol')
-        for sym, group in grouped:
-            # 简单降采样，保留首尾，中间均匀取点
-            if len(group) > 150:
-                step = len(group) // 150
-                sampled = group.iloc[::step].copy()
-                if group.index[-1] not in sampled.index:
-                    sampled = pd.concat([sampled, group.iloc[[-1]]])
-                result[sym] = sampled
-            else:
-                result[sym] = group
-            
-        return result
+        return {sym: group for sym, group in df_all.groupby('symbol')}
     except Exception as e:
         st.error(f"⚠️ 数据查询失败: {e}")
         return {}
 
-# --- C. 辅助逻辑 ---
+# --- C. 辅助与绘图 ---
 
 def format_number(num):
-    if num is None: return "$0"
     if abs(num) >= 1_000_000_000: return f"{num / 1_000_000_000:.2f}B"
     elif abs(num) >= 1_000_000: return f"{num / 1_000_000:.2f}M"
     elif abs(num) >= 1_000: return f"{num / 1_000:.1f}K"
     else: return f"{num:.0f}"
 
-def get_signal_info(price_chg, oi_chg):
-    """根据价格和OI涨跌返回信号标签文本、背景色和文字色"""
-    # 使用极小的阈值来判断涨跌，避免浮点数精度问题
-    epsilon = 1e-9
-    if price_chg > epsilon and oi_chg > epsilon:
-        return "🟢多头增仓", "#e6fffa", "#009900" # 强势看多
-    elif price_chg > epsilon and oi_chg < -epsilon:
-        return "🟡空头平仓", "#fffbe6", "#d48806" # 反弹/诱多
-    elif price_chg < -epsilon and oi_chg > epsilon:
-        return "🔴空头增仓", "#fff1f0", "#cf1322" # 强势看空
-    elif price_chg < -epsilon and oi_chg < -epsilon:
-        return "🟠多头平仓", "#fff7e6", "#d46b08" # 回调/踩踏
-    else:
-        return "⚪震荡/无信号", "#f5f5f5", "#8c8c8c"
+def downsample_data(df, target_points=400):
+    if len(df) <= target_points: return df
+    step = len(df) // target_points
+    df_sampled = df.iloc[::step].copy()
+    if df.index[-1] not in df_sampled.index:
+        df_sampled = pd.concat([df_sampled, df.iloc[[-1]]])
+    return df_sampled
 
-def create_mini_chart(df):
-    """创建极简迷你图 (Sparkline) - 高度 35px"""
+# 🔥 新增功能：量价背离信号判断
+def get_signal_info(price_chg, oi_chg):
+    """根据价格和OI涨跌返回信号标签和颜色"""
+    epsilon = 1e-9 # 防止浮点数误差
+    if price_chg > epsilon and oi_chg > epsilon:
+        return "🟢多头增仓", "#009900" 
+    elif price_chg > epsilon and oi_chg < -epsilon:
+        return "🟡空头平仓", "#d48806" 
+    elif price_chg < -epsilon and oi_chg > epsilon:
+        return "🔴空头增仓", "#cf1322" 
+    elif price_chg < -epsilon and oi_chg < -epsilon:
+        return "🟠多头平仓", "#d46b08" 
+    else:
+        return "⚪震荡", "#8c8c8c"
+
+axis_format_logic = """
+datum.value >= 1000000000 ? format(datum.value / 1000000000, ',.2f') + 'B' : 
+datum.value >= 1000000 ? format(datum.value / 1000000, ',.2f') + 'M' : 
+datum.value >= 1000 ? format(datum.value / 1000, ',.1f') + 'K' : 
+format(datum.value, ',.0f')
+"""
+
+def create_dual_axis_chart(df, symbol):
     if df.empty: return None
-    
-    # 确保时间列是 datetime 类型
     if not pd.api.types.is_datetime64_any_dtype(df['time']):
-        df = df.copy()
         df['time'] = pd.to_datetime(df['time'])
-    
     df = df.reset_index(drop=True)
     df['index'] = df.index
-    
     tooltip_fields = [
-        alt.Tooltip('time', title='时间', format="%H:%M"),
-        alt.Tooltip('标记价格 (USDC)', title='价格', format='$.4f'),
+        alt.Tooltip('time', title='时间', format="%m-%d %H:%M"),
+        alt.Tooltip('标记价格 (USDC)', title='价格', format='$,.4f'),
         alt.Tooltip('未平仓量', title='OI', format=',.0f') 
     ]
-    
-    base = alt.Chart(df).encode(alt.X('index', axis=None))
-    
-    line_price = base.mark_line(color='#d62728', strokeWidth=1.5).encode(
-        alt.Y('标记价格 (USDC)', axis=None, scale=alt.Scale(zero=False))
+    base = alt.Chart(df).encode(alt.X('index', title=None, axis=alt.Axis(labels=False)))
+    line_price = base.mark_line(color='#d62728', strokeWidth=2).encode(
+        alt.Y('标记价格 (USDC)', axis=alt.Axis(title='', titleColor='#d62728', orient='right'), scale=alt.Scale(zero=False))
     )
-    line_oi = base.mark_line(color='purple', strokeWidth=1.5).encode(
-        alt.Y('未平仓量', axis=None, scale=alt.Scale(zero=False))
+    line_oi = base.mark_line(color='purple', strokeWidth=2).encode(
+        alt.Y('未平仓量', axis=alt.Axis(title='OI', titleColor='purple', orient='right', offset=45, labelExpr=axis_format_logic), scale=alt.Scale(zero=False))
     )
-    
     chart = alt.layer(line_price, line_oi).resolve_scale(y='independent').encode(
         tooltip=tooltip_fields
-    ).properties(height=35, width='container').configure_view(strokeWidth=0)
+    ).properties(height=450) # 保持高清高度
     return chart
 
-def render_chart_component(rank, symbol, bulk_data, ranking_data, list_type=""):
-    """渲染单个列表项 - 修复 HTML 渲染问题"""
+def render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=False, list_type=""):
+    """
+    渲染单个图表组件
+    """
     raw_df = bulk_data.get(symbol)
     coinglass_url = f"https://www.coinglass.com/tv/zh/Hyperliquid_{symbol}-USD"
-    
+    title_color = "black"
     chart = None
-    main_value_str = "0%"
-    sub_tag_str = "MC: $0"
-    signal_span = "" # 初始化为空字符串
+    info_html = ""
+    signal_html = ""
     
     if raw_df is not None and not raw_df.empty:
-        item_stats = next((item for item in ranking_data if item["symbol"] == symbol), None)
+        start_p = raw_df['标记价格 (USDC)'].iloc[0]
+        end_p = raw_df['标记价格 (USDC)'].iloc[-1]
+        title_color = "#009900" if end_p >= start_p else "#D10000"
         
+        # 获取统计信息
+        item_stats = next((item for item in ranking_data if item["symbol"] == symbol), None)
         if item_stats:
-            # 获取信号数据
-            sig_text, sig_bg, sig_color = item_stats['signal']
-            # 构建信号标签的 HTML 字符串，注意边框颜色使用文字颜色
-            if sig_text and "无信号" not in sig_text:
-                signal_span = f'<span style="background-color: {sig_bg}; color: {sig_color}; padding: 1px 4px; border-radius: 3px; font-weight: 600; font-size: 10px; margin-right: 4px; border: 1px solid {sig_color};">{sig_text}</span>'
+            int_val = item_stats['intensity'] * 100
+            int_color = "#d62728" if int_val > 5 else ("#009900" if int_val > 1 else "#555")
+            growth_usd = item_stats['oi_growth_usd']
+            growth_str = format_number(growth_usd)
+            
+            # 🔥 获取信号并生成 HTML
+            sig_text, sig_color = item_stats['signal']
+            signal_html = f'<span style="background-color: {sig_color}20; color: {sig_color}; padding: 2px 6px; border-radius: 4px; font-size: 14px; margin-right: 10px; border: 1px solid {sig_color};">{sig_text}</span>'
+            
+            info_html = (
+                f'<span style="font-size: 14px; margin-left: 5px; color: #666;">'
+                f'强度:<span style="color: {int_color}; font-weight: bold;">{int_val:.1f}%</span>'
+                f'<span style="margin: 0 4px;">|</span>'
+                f'增量:<span style="color: #009900; font-weight: bold;">+${growth_str}</span>'
+                f'</span>'
+            )
 
-            # 根据榜单类型设置显示内容
-            if list_type == "strength":
-                val = item_stats['intensity'] * 100
-                main_value_str = f"{val:.2f}%"
-                mc = format_number(item_stats['market_cap'])
-                sub_tag_str = f"MC: ${mc}"
-            elif list_type == "whale":
-                val = item_stats['oi_growth_usd']
-                main_value_str = f"+${format_number(val)}"
-                sub_tag_str = "资金净流入"
-            else:
-                val = item_stats['price_change_pct'] * 100
-                main_value_str = f"{val:+.2f}%"
-                sub_tag_str = f"MC: ${format_number(item_stats['market_cap'])}"
+        chart_df = downsample_data(raw_df, target_points=400)
+        chart = create_dual_axis_chart(chart_df, symbol)
 
-        # 创建图表
-        chart = create_mini_chart(raw_df)
+    # 标题生成
+    fire_icon = "🔥" if list_type == "strength" else ("🐳" if list_type == "whale" else "")
+    
+    # 🔥 将信号标签插入到标题中
+    expander_title_html = (
+        f'<div style="text-align: center; margin-bottom: 5px;">'
+        f'{fire_icon} '
+        f'<a href="{coinglass_url}" target="_blank" '
+        f'style="text-decoration:none; color:{title_color}; font-weight:bold; font-size:20px;">'
+        f' {symbol} </a>'
+        f'<br>' # 换行显示详细数据
+        f'{signal_html}' # 信号标签
+        f'{info_html}'   # 强度数据
+        f'</div>'
+    )
+    
+    if is_top_mover:
+        label = f"{fire_icon} {symbol}"
+    else:
+        label = f"#{rank} {symbol}"
 
-    # 构建最终的 HTML，将 signal_span 嵌入
-    html_content = f"""
-    <a href="{coinglass_url}" target="_blank" style="text-decoration:none; display: block; color: inherit;">
-        <div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif;">
-            <div style="font-size: 11px; color: #888; margin-bottom: -2px;">
-                No.{rank} <span style="color: #333; font-weight: 500;">{symbol}</span>
-            </div>
-            <div style="font-size: 22px; font-weight: 600; color: #333; letter-spacing: -0.5px; line-height: 1.2;">
-                {main_value_str}
-            </div>
-            <div style="margin-top: 2px; display: flex; align-items: center;">
-                {signal_span}
-                <div style="background-color: #f0f2f6; padding: 1px 6px; border-radius: 3px; font-size: 10px; color: #666;">
-                    {sub_tag_str}
-                </div>
-            </div>
-        </div>
-    </a>
-    """
-
-    st.markdown(html_content, unsafe_allow_html=True)
-    if chart:
-        st.altair_chart(chart, use_container_width=True)
-    st.markdown("""<hr style="margin: 4px 0; border: 0; border-top: 1px solid #f0f0f0;">""", unsafe_allow_html=True)
+    with st.expander(label, expanded=True):
+        st.markdown(expander_title_html, unsafe_allow_html=True)
+        if chart:
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("暂无数据")
 
 # --- D. 主程序 ---
 
 def main_app():
-    st.set_page_config(layout="wide", page_title="HL OI Dashboard")
+    st.set_page_config(layout="wide", page_title="Hyperliquid OI Dashboard")
+    st.title("⚡ OI 双塔监控 (含量价信号)")
     
-    # CSS 样式调整
-    st.markdown("""
-        <style>
-        .block-container { padding-top: 1rem; padding-bottom: 2rem; }
-        .element-container { margin-bottom: 0px !important; }
-        .stMarkdown { margin-bottom: -5px !important; }
-        div[data-testid="stAltairChart"] { height: 35px !important; min-height: 35px !important; }
-        canvas { height: 35px !important; }
-        h5 { padding-top: 0px; margin-bottom: 10px; }
-        /* 修复侧边栏标题和信息框的间距 */
-        [data-testid="stSidebar"] h1 { margin-bottom: 0.5rem; }
-        [data-testid="stSidebar"] .stAlert { margin-top: 1rem; }
-        </style>
-    """, unsafe_allow_html=True)
-
-    # 侧边栏
-    with st.sidebar:
-        st.title("⚙️ 监控设置")
-        time_period = st.selectbox(
-            "时间周期 (Timeframe)", 
-            ["1H (突发)", "4H (趋势)", "24H (日线)", "7D (周线)"], 
-            index=2
-        )
-        sql_mapping = {
-            "1H (突发)": "1 HOUR",
-            "4H (趋势)": "4 HOUR",
-            "24H (日线)": "24 HOUR",
-            "7D (周线)": "7 DAY"
-        }
-        interval_sql = sql_mapping[time_period]
-        st.info(f"正在显示过去 {time_period} 的 OI 变化")
-
-    st.title(f"⚡ OI 极简看板 ({time_period})")
-    
-    with st.spinner(f"🚀 正在分析过去 {time_period} 的市场数据..."):
+    with st.spinner("正在读取流通量数据库..."):
         supply_data = fetch_circulating_supply()
+        
+    with st.spinner("正在加载市场数据..."):
         sorted_symbols = get_sorted_symbols_by_oi_usd()
-        
-        if not sorted_symbols:
-            st.error("❌ 无法获取币种列表，请检查数据库连接。")
-            st.stop()
-        
-        # 取前 100 个活跃币种进行分析
+        if not sorted_symbols: st.stop()
         target_symbols = sorted_symbols[:100]
-        bulk_data = fetch_bulk_data_one_shot(target_symbols, interval_sql=interval_sql)
+        bulk_data = fetch_bulk_data_one_shot(target_symbols)
 
     if not bulk_data:
-        st.warning(f"⚠️ 过去 {time_period} 内无数据更新，请尝试切换其他周期。"); st.stop()
+        st.warning("暂无数据"); st.stop()
 
-    # --- 计算统计数据 ---
+    # --- 计算统计数据 (含信号计算) ---
     ranking_data = []
     for sym, df in bulk_data.items():
         if df.empty or len(df) < 2: continue
         
-        token_info = supply_data.get(sym, {})
+        token_info = supply_data.get(sym)
         
         # 价格数据
         start_p = df['标记价格 (USDC)'].iloc[0]
         current_p = df['标记价格 (USDC)'].iloc[-1]
-        # 避免价格为0的除零错误
-        price_change_pct = (current_p - start_p) / start_p if start_p > 0 else 0
         
         # OI 数据
         min_oi = df['未平仓量'].min()
         start_oi = df['未平仓量'].iloc[0]
         current_oi = df['未平仓量'].iloc[-1]
         
-        # 强度榜逻辑 (基于区间内最大增长量)
-        oi_growth_tokens = current_oi - min_oi 
+        # 计算核心指标
+        oi_growth_tokens = current_oi - min_oi
         oi_growth_usd = oi_growth_tokens * current_p
         
-        # 信号逻辑 (基于区间首尾变化率)
+        # 🔥 计算信号 (第2点核心逻辑)
+        price_change_pct = (current_p - start_p) / start_p if start_p > 0 else 0
         oi_change_pct = (current_oi - start_oi) / start_oi if start_oi > 0 else 0
         signal_tuple = get_signal_info(price_change_pct, oi_change_pct)
         
-        # 计算强度和市值
         intensity = 0
-        market_cap = token_info.get('market_cap', 0)
-        supply = token_info.get('circulating_supply', 0)
-
-        if market_cap > 0:
+        market_cap = 0
+        if token_info and token_info.get('market_cap') and token_info['market_cap'] > 0:
+            market_cap = token_info['market_cap']
             intensity = oi_growth_usd / market_cap
-        elif supply > 0:
+        elif token_info and token_info.get('circulating_supply') and token_info['circulating_supply'] > 0:
+            supply = token_info['circulating_supply']
             intensity = oi_growth_tokens / supply
         else:
-            # 如果没有市值和流通量信息，用一个备用算法
             if min_oi > 0: intensity = (oi_growth_tokens / min_oi) * 0.1
 
         ranking_data.append({
@@ -323,44 +280,83 @@ def main_app():
             "intensity": intensity, 
             "oi_growth_usd": oi_growth_usd,
             "market_cap": market_cap,
-            "price_change_pct": price_change_pct,
-            "signal": signal_tuple
+            "signal": signal_tuple # 存储信号
         })
 
-    # 排序
-    top_intensity = sorted(ranking_data, key=lambda x: x['intensity'], reverse=True)[:10]
-    top_whales = sorted(ranking_data, key=lambda x: x['oi_growth_usd'], reverse=True)[:10]
-    
-    # 列表展示
+    # ==========================
+    # 榜单指标区 (Metric Lists)
+    # ==========================
     col_left, col_right = st.columns(2)
     
+    top_intensity = sorted(ranking_data, key=lambda x: x['intensity'], reverse=True)[:10]
+    top_whales = sorted(ranking_data, key=lambda x: x['oi_growth_usd'], reverse=True)[:10]
+
+    # --- 左侧指标：Top 10 强度 ---
     with col_left:
-        st.markdown(f"##### 🔥 强度榜 ({time_period})") 
+        st.subheader("🔥 Top 10 强度榜 (相对比例)")
+        st.caption("逻辑：(当前OI - 最低OI) / 市值。")
         st.markdown("---")
+        for i, item in enumerate(top_intensity):
+            st.metric(
+                label=f"No.{i+1} {item['symbol']}",
+                value=f"{item['intensity']*100:.2f}%",
+                delta=f"MC: ${format_number(item['market_cap'])}",
+                delta_color="off"
+            )
+            st.markdown("""<hr style="margin: 5px 0; border-top: 1px dashed #eee;">""", unsafe_allow_html=True)
+    
+    # --- 右侧指标：Top 10 巨鲸 ---
+    with col_right:
+        st.subheader("🐳 Top 10 巨鲸榜 (绝对金额)")
+        st.caption("逻辑：(当前OI - 最低OI) * 价格。")
+        st.markdown("---")
+        for i, item in enumerate(top_whales):
+            st.metric(
+                label=f"No.{i+1} {item['symbol']}",
+                value=f"+${format_number(item['oi_growth_usd'])}",
+                delta="资金净流入",
+                delta_color="normal"
+            )
+            st.markdown("""<hr style="margin: 5px 0; border-top: 1px dashed #eee;">""", unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # ==========================
+    # 双塔图表区 (Charts) - 左右并列
+    # ==========================
+    
+    chart_col_left, chart_col_right = st.columns(2)
+    
+    # --- 左塔：Top 10 强度图表 ---
+    with chart_col_left:
+        st.subheader("📈 强度 Top 10 走势")
         if top_intensity:
             for i, item in enumerate(top_intensity, 1):
-                render_chart_component(i, item['symbol'], bulk_data, ranking_data, list_type="strength")
+                render_chart_component(i, item['symbol'], bulk_data, ranking_data, is_top_mover=True, list_type="strength")
         else:
             st.info("暂无数据")
 
-    with col_right:
-        st.markdown(f"##### 🐳 巨鲸榜 ({time_period})")
-        st.markdown("---")
+    # --- 右塔：Top 10 巨鲸图表 ---
+    with chart_col_right:
+        st.subheader("📈 巨鲸 Top 10 走势")
         if top_whales:
             for i, item in enumerate(top_whales, 1):
-                render_chart_component(i, item['symbol'], bulk_data, ranking_data, list_type="whale")
+                render_chart_component(i, item['symbol'], bulk_data, ranking_data, is_top_mover=True, list_type="whale")
         else:
             st.info("暂无数据")
     
-    st.markdown("##### 📋 其他异动")
-    shown_symbols = set([x['symbol'] for x in top_intensity] + [x['symbol'] for x in top_whales])
-    remaining = [s for s in target_symbols if s not in shown_symbols]
+    st.markdown("---")
+    st.subheader("📋 其他合约列表 (已去重)")
+
+    # --- 底部：剩余列表 (去重) ---
+    shown_symbols = set()
+    for item in top_intensity: shown_symbols.add(item['symbol'])
+    for item in top_whales: shown_symbols.add(item['symbol'])
     
-    if remaining:
-        cols = st.columns(4)
-        for idx, symbol in enumerate(remaining):
-            with cols[idx % 4]:
-                render_chart_component(idx+1, symbol, bulk_data, ranking_data, list_type="normal")
+    remaining_symbols = [s for s in target_symbols if s not in shown_symbols]
+
+    for rank, symbol in enumerate(remaining_symbols, 1):
+        render_chart_component(rank, symbol, bulk_data, ranking_data, is_top_mover=False)
 
 if __name__ == '__main__':
     main_app()
