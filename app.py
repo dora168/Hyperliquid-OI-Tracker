@@ -518,65 +518,37 @@ def main_app():
         top_whales = sorted(ranking_data, key=lambda x: x['oi_growth_usd'], reverse=True)[:10]
 
 
-
-    # --- 左侧指标：Top 10 强度 ---
-
+# --- 左侧指标：Top 10 强度 (修改后) ---
     with col_left:
-
         st.subheader("🔥 Top 10 强度榜 (相对比例)")
-
         st.caption("逻辑：(当前OI - 最低OI) / 市值。")
-
         st.markdown("---")
+        
+        # 添加了非空判断
+        if top_intensity:
+            for i, item in enumerate(top_intensity):
+                # 使用 render_chart_component 替代原来的 st.metric 和分割线
+                # 注意：排名的索引 i 需要 +1
+                render_chart_component(i + 1, item['symbol'], bulk_data, ranking_data, list_type="strength")
+        else:
+            st.info("暂无数据")
 
-        for i, item in enumerate(top_intensity):
-
-            st.metric(
-
-                label=f"No.{i+1} {item['symbol']}",
-
-                value=f"{item['intensity']*100:.2f}%",
-
-                delta=f"MC: ${format_number(item['market_cap'])}",
-
-                delta_color="off"
-
-            )
-
-            st.markdown("""<hr style="margin: 5px 0; border-top: 1px dashed #eee;">""", unsafe_allow_html=True)
-
-    
-
-    # --- 右侧指标：Top 10 巨鲸 ---
-
+    # --- 右侧指标：Top 10 巨鲸 (修改后) ---
     with col_right:
-
         st.subheader("🐳 Top 10 巨鲸榜 (绝对金额)")
-
         st.caption("逻辑：(当前OI - 最低OI) * 价格。")
-
         st.markdown("---")
-
-        for i, item in enumerate(top_whales):
-
-            st.metric(
-
-                label=f"No.{i+1} {item['symbol']}",
-
-                value=f"+${format_number(item['oi_growth_usd'])}",
-
-                delta="资金净流入",
-
-                delta_color="normal"
-
-            )
-
-            st.markdown("""<hr style="margin: 5px 0; border-top: 1px dashed #eee;">""", unsafe_allow_html=True)
-
+        
+        # 添加了非空判断
+        if top_whales:
+            for i, item in enumerate(top_whales):
+                # 使用 render_chart_component 替代原来的 st.metric 和分割线
+                render_chart_component(i + 1, item['symbol'], bulk_data, ranking_data, list_type="whale")
+        else:
+            st.info("暂无数据")
     
-
+    # 两个榜单结束后的分割线
     st.markdown("---")
-
     
 
     # ==========================
@@ -664,3 +636,4 @@ def main_app():
 if __name__ == '__main__':
 
     main_app()
+
