@@ -85,7 +85,7 @@ def get_connection(db_name):
     finally:
 
         conn.close()
-        @st.cache_data(ttl=1)
+@st.cache_data(ttl=1)
 
 def fetch_circulating_supply():
 
@@ -664,4 +664,3 @@ def main_app():
 if __name__ == '__main__':
 
     main_app()
-
