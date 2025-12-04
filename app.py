@@ -43,7 +43,7 @@ def get_connection(db_name):
     finally:
         conn.close()
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1)
 def fetch_circulating_supply():
     try:
         with get_connection(DB_NAME_SUPPLY) as conn:
@@ -333,5 +333,6 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
