@@ -18,7 +18,7 @@ DB_NAME_SUPPLY = 'circulating_supply'
 
 # 策略：即使我们只取 ~400 个点，我们仍查看过去 4000 个周期的数据范围，但在 SQL 中进行过滤
 DATA_LIMIT_RAW = 4000 
-SAMPLE_STEP = 4  # 每 10 行取 1 行
+SAMPLE_STEP = 10  # 每 10 行取 1 行
 
 # --- B. 数据库功能 (Rust 加速版) ---
 
@@ -325,6 +325,7 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
 
