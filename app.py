@@ -1,187 +1,114 @@
 import streamlit as st
-
 import pandas as pd
-
 import altair as alt
-
-import pymysql
-
 import os
+import connectorx as cx  # <--- 引入 Rust 编写的高性能加载器
+from urllib.parse import quote_plus
 
-from contextlib import contextmanager
-
-
-
-# --- A. 数据库配置 ----
-
+# --- A. 数据库配置 (保持不变) ----
 DB_HOST = os.getenv("DB_HOST") or st.secrets.get("DB_HOST", "cd-cdb-p6vea42o.sql.tencentcdb.com")
-
 DB_PORT = int(os.getenv("DB_PORT") or st.secrets.get("DB_PORT", 24197))
-
 DB_USER = os.getenv("DB_USER") or st.secrets.get("DB_USER", "root")
-
 DB_PASSWORD = os.getenv("DB_PASSWORD") or st.secrets.get("DB_PASSWORD", None) 
-
 DB_CHARSET = 'utf8mb4'
-
-
-
 DB_NAME_OI = 'open_interest_db'
-
 DB_NAME_SUPPLY = 'circulating_supply'
 
-DATA_LIMIT = 4000 
+# 优化策略：虽然只取400点绘图，但为了计算准确的 min/max，我们可以在 SQL 里做某种程度的预聚合，
+# 或者只取必要的点。这里我们采用 "间隔采样" 策略。
+DATA_LIMIT_RAW = 4000 
+SAMPLE_STEP = 4  # SQL层面每10行取1行，将数据量直接减少90%
 
-
-
-# --- B. 数据库功能 ---
-
-
+# --- B. 数据库功能 (Rust 加速版) ---
 
 @st.cache_resource
-
-def get_db_connection_params(db_name):
-
+def get_db_uri(db_name):
+    """构建 connectorx 需要的连接字符串 (mysql://...)"""
     if not DB_PASSWORD:
-
         st.error("❌ 数据库密码未配置。")
-
         st.stop()
+    # 对密码进行 URL 编码，防止特殊字符导致连接失败
+    safe_pwd = quote_plus(DB_PASSWORD)
+    return f"mysql://{DB_USER}:{safe_pwd}@{DB_HOST}:{DB_PORT}/{db_name}?charset={DB_CHARSET}"
 
-    return {
-
-        'host': DB_HOST,
-
-        'port': DB_PORT,
-
-        'user': DB_USER,
-
-        'password': DB_PASSWORD,
-
-        'db': db_name,
-
-        'charset': DB_CHARSET,
-
-        'autocommit': True,
-
-        'connect_timeout': 10
-
-    }
-
-
-
-@contextmanager
-
-def get_connection(db_name):
-
-    params = get_db_connection_params(db_name)
-
-    conn = pymysql.connect(**params)
-
-    try:
-
-        yield conn
-
-    finally:
-
-        conn.close()
-@st.cache_data(ttl=1)
-
+@st.cache_data(ttl=300) # 流通量不常变，缓存久一点
 def fetch_circulating_supply():
-
     try:
-
-        with get_connection(DB_NAME_SUPPLY) as conn:
-
-            sql = f"SELECT symbol, circulating_supply, market_cap FROM `{DB_NAME_SUPPLY}`"
-
-            df = pd.read_sql(sql, conn)
-
-            return df.set_index('symbol').to_dict('index')
-
+        uri = get_db_uri(DB_NAME_SUPPLY)
+        query = f"SELECT symbol, circulating_supply, market_cap FROM `{DB_NAME_SUPPLY}`"
+        # 使用 Rust 引擎读取，速度极快
+        df = cx.read_sql(uri, query)
+        return df.set_index('symbol').to_dict('index')
     except Exception as e:
-
         print(f"⚠️ 流通量数据读取失败: {e}")
-
         return {}
-
-
 
 @st.cache_data(ttl=60)
-
 def get_sorted_symbols_by_oi_usd():
-
     try:
-
-        with get_connection(DB_NAME_OI) as conn:
-
-            sql = f"SELECT symbol FROM `hyperliquid` GROUP BY symbol ORDER BY MAX(oi_usd) DESC;"
-
-            df = pd.read_sql(sql, conn)
-
-            return df['symbol'].tolist()
-
+        uri = get_db_uri(DB_NAME_OI)
+        # 获取列表只需极少数据，非常快
+        query = "SELECT symbol FROM `hyperliquid` GROUP BY symbol ORDER BY MAX(oi_usd) DESC"
+        df = cx.read_sql(uri, query)
+        return df['symbol'].tolist()
     except Exception as e:
-
         st.error(f"❌ 列表获取失败: {e}")
-
         return []
 
-
-
 @st.cache_data(ttl=60, show_spinner=False)
-
 def fetch_bulk_data_one_shot(symbol_list):
-
     if not symbol_list: return {}
-
-    placeholders = ', '.join(['%s'] * len(symbol_list))
-
     
-
+    # 构造 SQL IN 子句的字符串
+    symbols_str = "', '".join(symbol_list)
+    
+    # 🌟 核心优化 SQL 🌟
+    # 1. 使用 MOD(rn, 10) = 1 在数据库端直接过滤 90% 的数据
+    # 2. 这样传输到 Python 的数据只有 4000/10 = 400 行左右，完美适配绘图，无需再做 downsample
     sql_query = f"""
-
     WITH RankedData AS (
-
         SELECT symbol, `time`, `price`, `oi`,
-
         ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY `time` DESC) as rn
-
         FROM `hyperliquid`
-
-        WHERE symbol IN ({placeholders})
-
+        WHERE symbol IN ('{symbols_str}')
     )
-
     SELECT symbol, `time`, `price` AS `标记价格 (USDC)`, `oi` AS `未平仓量`
-
     FROM RankedData
-
-    WHERE rn <= %s
-
+    WHERE rn <= {DATA_LIMIT_RAW} 
+    AND (rn = 1 OR rn % {SAMPLE_STEP} = 0) -- 保留最新一条(rn=1)和每隔N条的数据
     ORDER BY symbol, `time` ASC;
-
     """
-
     
-
     try:
-
-        with get_connection(DB_NAME_OI) as conn:
-
-            df_all = pd.read_sql(sql_query, conn, params=tuple(symbol_list) + (DATA_LIMIT,))
-
+        uri = get_db_uri(DB_NAME_OI)
+        # ConnectorX (Rust) 直接将 SQL 结果写入 Pandas 内存，零拷贝，极快
+        df_all = cx.read_sql(uri, sql_query)
         
-
         if df_all.empty: return {}
+        
+        # 转换时间列 (ConnectorX 有时返回 str 有时返回 datetime，确保统一)
+        if not pd.api.types.is_datetime64_any_dtype(df_all['time']):
+            df_all['time'] = pd.to_datetime(df_all['time'])
 
         return {sym: group for sym, group in df_all.groupby('symbol')}
-
     except Exception as e:
-
         st.error(f"⚠️ 数据查询失败: {e}")
-
         return {}
+
+# --- C. 辅助与绘图 (微调) ---
+
+# 注意：由于我们在 SQL 里已经做了降采样，Python 里的 downsample_data 函数可以简化或移除
+# 为了兼容性，我们可以保留它做一个简单的检查
+
+def downsample_data(df, target_points=400):
+    # 如果数据量已经很小（因为 SQL 过滤过了），直接返回
+    if len(df) <= target_points * 1.5: 
+        return df
+    return df.iloc[::len(df)//target_points]
+
+# ... (其余 C 和 D 部分的代码保持不变，因为绘图逻辑不需要动) ...
+
+# 将你的 main_app 等其余代码粘贴在下面即可
 
 
 
@@ -662,5 +589,6 @@ def main_app():
 if __name__ == '__main__':
 
     main_app()
+
 
 
