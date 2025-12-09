@@ -1,4 +1,7 @@
 streamlit
 pandas
 pymysql
+connectorx
+pymysql
+cryptography
 plotly
