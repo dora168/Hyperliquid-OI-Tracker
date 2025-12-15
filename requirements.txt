@@ -5,3 +5,6 @@ connectorx
 pymysql
 cryptography
 plotly
+streamlit
+requests
+pandas
